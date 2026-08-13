@@ -1,0 +1,1946 @@
+import streamlit as st
+import pandas as pd
+import os
+import io
+import json
+import base64
+import sqlite3
+import streamlit.components.v1 as components
+from bs4 import BeautifulSoup
+from svgpathtools import parse_path
+
+# =============================================================================
+# 0. ПОДКЛЮЧЕНИЕ ШРИФТОВ GOLOS
+# =============================================================================
+font_faces_css = """
+@font-face {
+  font-family: 'Golos UI';
+  src: url('/static/fonts/Golos-UI_VF.woff2') format('woff2'),
+       url('/static/fonts/Golos-UI_VF.woff') format('woff');
+  font-weight: 100 900;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'Golos Text';
+  src: url('/static/fonts/golos-text_vf.woff2') format('woff2'),
+       url('/static/fonts/golos-text_vf.woff') format('woff');
+  font-weight: 100 900;
+  font-style: normal;
+  font-display: swap;
+}
+"""
+
+# =============================================================================
+# 1. ИНИЦИАЛИЗАЦИЯ ХРАНИЛИЩА И СЧЕТЧИКА ПОСЕЩЕНИЙ
+# =============================================================================
+def init_counter_db():
+    conn = sqlite3.connect('visits.db')
+    cursor = conn.cursor()
+    cursor.execute('''CREATE TABLE IF NOT EXISTS counter (id INTEGER PRIMARY KEY, count INTEGER)''')
+    cursor.execute('''CREATE TABLE IF NOT EXISTS processed_sessions (session_key TEXT PRIMARY KEY)''')
+    cursor.execute('SELECT count FROM counter WHERE id = 1')
+    if cursor.fetchone() is None:
+        cursor.execute('INSERT INTO counter (id, count) VALUES (1, 0)')
+    conn.commit()
+    conn.close()
+
+def increment_and_get_visits(current_session_key):
+    conn = sqlite3.connect('visits.db')
+    cursor = conn.cursor()
+    cursor.execute('SELECT session_key FROM processed_sessions WHERE session_key = ?', (current_session_key,))
+    if cursor.fetchone() is None:
+        cursor.execute('INSERT INTO processed_sessions (session_key) VALUES (?)', (current_session_key,))
+        cursor.execute('UPDATE counter SET count = count + 1 WHERE id = 1')
+        conn.commit()
+    cursor.execute('SELECT count FROM counter WHERE id = 1')
+    count = cursor.fetchone()[0]
+    conn.close()
+    return count
+
+init_counter_db()
+
+# =============================================================================
+# 2. НАСТРОЙКА СТРАНИЦЫ И ГЛОБАЛЬНОЙ СЕССИИ
+# =============================================================================
+st.set_page_config(page_title="Информационный портал КФД НСО", layout="wide", page_icon="🏦")
+
+try:
+    from streamlit.runtime.scriptrunner import get_script_run_ctx
+    ctx = get_script_run_ctx()
+    session_id = ctx.session_id if ctx else "default_session"
+except Exception:
+    session_id = "fallback_session"
+
+def set_date_param():
+    if "selected_date" in st.session_state:
+        st.query_params["date"] = st.session_state.selected_date
+
+query_params = st.query_params
+has_region_param = "region" in query_params
+show_contacts = query_params.get("show_contacts", "") == "1"
+
+current_date = query_params.get("date", "01.07.2025")
+if isinstance(current_date, list):
+    current_date = current_date[0]
+
+if 'visit_counted' not in st.session_state:
+    if not has_region_param:
+        st.session_state.visit_count = increment_and_get_visits(session_id)
+    else:
+        conn = sqlite3.connect('visits.db')
+        cursor = conn.cursor()
+        cursor.execute('SELECT count FROM counter WHERE id = 1')
+        res = cursor.fetchone()
+        st.session_state.visit_count = res[0] if res else 0
+        conn.close()
+    st.session_state.visit_counted = True
+
+# =============================================================================
+# 3. НАСТРОЙКА СПИСКА РАЙОНОВ С ТЕМНЫМ ШРИФТОМ НА КАРТАХ
+# =============================================================================
+# DARK_FONT_REGIONS = ["Краснозерский", "Татарский"]
+
+# Константы
+# цвет шрифта пилотного района
+DARK_FONT_REGION_COLOR = "#02bd34"
+
+# =============================================================================
+# 4. ОПТИМИЗИРОВАННЫЕ ФУНКЦИИ ДАННЫХ
+# =============================================================================
+
+# Загрузка конфигурации (раздел инициализации данных)
+@st.cache_data
+def load_config(file_path="config.json"):
+    if os.path.exists(file_path):
+        try:
+            with open(file_path, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            return {}
+    return {}
+
+# Загружаем конфиг
+config = load_config()
+
+# Получаем список дат для выбора (отсортированный)
+dates_list = list(config.get("reporting_dates", {}).keys())
+
+# Получаем список регионов для выбранной даты
+selected_config = config.get("reporting_dates", {}).get(current_date, {})
+DARK_FONT_REGIONS = selected_config.get("dark_font_regions", [])
+
+# Функция мониторинга/автозамены "переноса строки" Alt Enter на перенос строки при отображении
+def process_excel_linebreaks(df):
+  # Проходим по всем колонкам и заменяем реальные символы переноса на HTML-тег <br>
+  for col in df.select_dtypes(include=["object", "string"]).columns:
+    df[col] = (
+        df[col]
+        .astype(str)
+        .str.replace("\r\n", "<br>", regex=False)
+        .str.replace("\n", "<br>", regex=False)
+    )
+  return df
+
+def short_region_name(name):
+    name = str(name)
+    for rep in [" муниципальный район", " городской округ", " муниципальный округ", " район"]:
+        name = name.replace(rep, "")
+    return name.strip()
+
+def get_need_level_class(col_name, num_val):
+    if not str(col_name).startswith("Уровень потребности в ДБО"):
+        return ""
+    num_val = round(num_val, 2)
+    if 0 <= num_val < 11:
+        return "need-level-0-10"
+    elif 11 <= num_val < 16:
+        return "need-level-11-15"
+    elif 16 <= num_val < 21:
+        return "need-level-16-20"
+    elif 21 <= num_val < 31:
+        return "need-level-21-30"
+    elif num_val >= 31:
+        return "need-level-31-100"
+    return ""
+
+@st.cache_data
+def load_region_data(file_path):
+    if not os.path.exists(file_path):
+        return None
+    df = pd.read_excel(file_path)
+    df['ID'] = df['ID'].astype(str).str.strip()
+    if "Численность населения, чел." in df.columns:
+        df["Численность населения, чел."] = df["Численность населения, чел."].astype(float).round(0).astype(int)
+    if "Действующие ФП" in df.columns:
+        df["Действующие ФП"] = df["Действующие ФП"].astype(float).round(1)
+    return df
+
+@st.cache_data
+def load_np_data(file_name):
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    cwd = os.getcwd()
+    search_dirs = [cwd, script_dir]
+    target_path = None
+    for d in search_dirs:
+        exact = os.path.join(d, file_name)
+        if os.path.exists(exact):
+            target_path = exact
+            break
+    if not target_path:
+        for d in search_dirs:
+            try:
+                for fname in os.listdir(d):
+                    if fname.lower() == file_name.lower():
+                        target_path = os.path.join(d, fname)
+                        break
+                if target_path:
+                    break
+            except Exception:
+                pass
+    if not target_path:
+        import glob
+        for d in search_dirs:
+            matches = glob.glob(os.path.join(d, "DB_*_NP.xlsx"))
+            if matches:
+                target_path = matches[0]
+                break
+    if not target_path:
+        return None
+    df = pd.read_excel(target_path)
+    if "Численность населения, чел." in df.columns:
+        df["Численность населения, чел."] = df["Численность населения, чел."].apply(
+            lambda x: int(round(float(x))) if pd.notna(x) else 0)
+    return df
+
+@st.cache_data
+def load_indicators(file_path):
+    if not os.path.exists(file_path):
+        return None
+    df = pd.read_excel(file_path, header=None)
+    return df
+
+@st.cache_data
+def load_nso_summary_data(file_path):
+    if not os.path.exists(file_path):
+        return None
+    df = pd.read_excel(file_path)
+    if "Численность населения, чел." in df.columns:
+        df["Численность населения, чел."] = df["Численность населения, чел."].astype(float).round(0).astype(int)
+    if "Действующие ФП" in df.columns:
+        df["Действующие ФП"] = df["Действующие ФП"].astype(float).round(1)
+    return df
+
+@st.cache_data
+def prepare_svg(svg_path, df_regions, current_date_val, interactive=True, dark_font_regions=None):
+    if dark_font_regions is None:
+        dark_font_regions = ()
+    if not os.path.exists(svg_path):
+        return None
+    with open(svg_path, "r", encoding="utf-8") as f:
+        svg_content = f.read()
+    soup = BeautifulSoup(svg_content, "xml")
+    svg = soup.find("svg")
+    if svg is None:
+        return None
+    if svg.has_attr("width"):
+        del svg["width"]
+    if svg.has_attr("height"):
+        del svg["height"]
+    svg["preserveAspectRatio"] = "xMidYMid meet"
+
+    region_map = {}
+    if df_regions is not None and not df_regions.empty:
+        for _, row in df_regions.iterrows():
+            region_map[str(row["ID"]).strip()] = short_region_name(row["Район"])
+
+    paths = svg.find_all("path")
+    for path in paths:
+        if not path.has_attr("id"):
+            continue
+        path_id = path["id"].strip()
+        short_name = region_map.get(path_id, path_id)
+
+        if interactive:
+            title_tag = soup.new_tag("title")
+            title_tag.string = short_name
+            path.append(title_tag)
+
+        center_x, center_y = 0, 0
+        try:
+            d = path.get("d")
+            if d:
+                svg_path_obj = parse_path(d)
+                xmin, xmax, ymin, ymax = svg_path_obj.bbox()
+                center_x = (xmin + xmax) / 2
+                center_y = (ymin + ymax) / 2
+                if short_name == "Куйбышевский":
+                    center_y += 18
+                    center_x -= 10
+                elif short_name == "Доволенский":
+                    center_y += 5
+                    center_x += 5
+                elif short_name == "Карасукский":
+                    center_y += 10
+                    center_x += 10
+        except Exception:
+            pass
+
+        label_class = "map-label" if interactive else "heatmap-label"
+        text_attrs = {"x": str(center_x), "y": str(center_y), "class": label_class}
+        if short_name in dark_font_regions:
+            text_attrs["style"] = f"fill: {DARK_FONT_REGION_COLOR};"
+
+        if interactive:
+            parent = path.parent
+            if parent.name != "a":
+                link_tag = soup.new_tag("a", href=f"?region={path_id}&date={current_date_val}", target="_self")
+                path.wrap(link_tag)
+                if center_x != 0 and center_y != 0:
+                    text_tag = soup.new_tag("text", **text_attrs)
+                    text_tag.string = short_name
+                    link_tag.append(text_tag)
+        else:
+            if center_x != 0 and center_y != 0:
+                text_tag = soup.new_tag("text", **text_attrs)
+                text_tag.string = short_name
+                svg.append(text_tag)
+
+    return str(svg)
+
+@st.cache_data
+def convert_df_to_excel_b64(df, sheet_name='Sheet1'):
+    buffer = io.BytesIO()
+    with pd.ExcelWriter(buffer, engine='xlsxwriter') as writer:
+        df.to_excel(writer, index=False, sheet_name=sheet_name)
+        worksheet = writer.sheets[sheet_name]
+        for idx, col in enumerate(df.columns):
+            max_len = max(df[col].astype(str).map(len).max(), len(str(col))) + 2
+            worksheet.set_column(idx, idx, max_len)
+    return base64.b64encode(buffer.getvalue()).decode()
+
+@st.cache_data
+def load_file_to_base64(file_path):
+    if os.path.exists(file_path):
+        with open(file_path, "rb") as f:
+            return base64.b64encode(f.read()).decode()
+    return None
+
+# =============================================================================
+# 5. ДИНАМИЧЕСКОЕ ОПРЕДЕЛЕНИЕ ФАЙЛОВ
+# =============================================================================
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+SVG_DIR = os.path.join(BASE_DIR, "content", "SVG")
+XLS_DIR = os.path.join(BASE_DIR, "content", "xls")
+
+date_suffix = f"_{current_date}"
+
+# SVG_FILE = f"NSO_f{date_suffix}.svg"
+# EXCEL_FILE = f"NSO_regions{date_suffix}.xlsx"
+# HEATMAP_SVG_FILE = f"NSO_p{date_suffix}.svg"
+# EXCEL_F_FILE = f"NSO_f_regions{date_suffix}.xlsx"
+# EXCEL_P_FILE = f"NSO_p_regions{date_suffix}.xlsx"
+# NP_FILE = f"DB{date_suffix}_NP.xlsx"
+# MAIN_INDICATORS_FILE = f"main_indicators{date_suffix}.xlsx"
+# NSO_SUMMARY_FILE = f"NSO{date_suffix}.xlsx"
+
+HEATMAP_SVG_FILE = os.path.join(SVG_DIR, f"NSO_f{date_suffix}.svg")
+SVG_FILE = os.path.join(SVG_DIR, f"NSO_p{date_suffix}.svg")
+EXCEL_FILE = os.path.join(XLS_DIR, f"NSO_regions{date_suffix}.xlsx")
+EXCEL_F_FILE = os.path.join(XLS_DIR, f"NSO_f_regions{date_suffix}.xlsx")
+EXCEL_P_FILE = os.path.join(XLS_DIR, f"NSO_p_regions{date_suffix}.xlsx")
+NP_FILE = os.path.join(XLS_DIR, f"DB{date_suffix}_NP.xlsx")
+INDICATORS_FILE = os.path.join(XLS_DIR, f"indicators{date_suffix}.xlsx")
+NSO_SUMMARY_FILE = os.path.join(XLS_DIR, f"NSO{date_suffix}.xlsx")
+
+df_regions = load_region_data(EXCEL_FILE)
+df_np_all = load_np_data(NP_FILE)
+df_indicators = load_indicators(INDICATORS_FILE)
+
+# Мониторим перенос строк
+df_indicators = process_excel_linebreaks(df_indicators)
+#
+
+df_nso_summary = load_nso_summary_data(NSO_SUMMARY_FILE)
+
+dark_tuple = tuple(DARK_FONT_REGIONS)
+interactive_svg = prepare_svg(SVG_FILE, df_regions, current_date, interactive=True, dark_font_regions=dark_tuple)
+heatmap_svg = prepare_svg(HEATMAP_SVG_FILE, df_regions, current_date, interactive=False, dark_font_regions=dark_tuple)
+
+if interactive_svg:
+    current_page_val = query_params.get("page", "home")
+    if isinstance(current_page_val, list):
+        current_page_val = current_page_val[0]
+    interactive_svg = interactive_svg.replace(
+        'href="?region=', 
+        f'href="?from_page={current_page_val}&region='
+    )
+
+b64_manual = load_file_to_base64("Руководство пользователя.zip")
+b64_tfd = load_file_to_base64("Как открыть ТФД.zip")
+b64_fp = load_file_to_base64("Как назначить ФП.zip")
+b64_tcash = load_file_to_base64("Как подключить точку кэшаут.zip")
+
+b64_sfo_map = load_file_to_base64("Интерактивная карта СФО.xlsm")
+b64_excel_f = load_file_to_base64(EXCEL_F_FILE)
+b64_excel_p = load_file_to_base64(EXCEL_P_FILE)
+
+display_df = df_regions.copy() if df_regions is not None else pd.DataFrame()
+
+# =============================================================================
+# 6. НАВИГАЦИЯ
+# =============================================================================
+def go_home():
+    st.session_state.page = 'home'
+    st.session_state.selected_region = None
+    if "region" in query_params:
+        del query_params["region"]
+    if "page" in query_params:
+        del query_params["page"]
+    if "show_contacts" in query_params:
+        del query_params["show_contacts"]
+
+if has_region_param:
+    requested_region_id = str(query_params["region"]).strip()
+    if df_regions is not None and not df_regions.empty and requested_region_id in df_regions['ID'].astype(str).str.strip().values:
+        st.session_state.selected_region = query_params["region"]
+        st.session_state.page = 'district'
+    else:
+        go_home()
+        st.rerun()
+else:
+    page_param = query_params.get("page", "")
+    if isinstance(page_param, list):
+        page_param = page_param[0]
+    if page_param == "page2":
+        st.session_state.page = 'page2'
+    elif page_param == "page3":
+        st.session_state.page = 'page3'
+    elif st.session_state.get('page') == 'district' and not has_region_param:
+        go_home()
+    elif 'page' not in st.session_state:
+        st.session_state.page = 'home'
+        st.session_state.selected_region = None
+
+# =============================================================================
+# 7. CSS СТИЛИЗАЦИЯ
+# =============================================================================
+st.markdown(f"""
+<style>
+{font_faces_css}
+
+:root {{
+    --font-ui: 'Golos UI', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+    --font-text: 'Golos Text', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+}}
+
+body, .stApp, .stMarkdown, .stText, p, span, div {{
+    font-family: var(--font-text);
+    font-variant-numeric: lining-nums tabular-nums;
+}}
+
+div[data-testid="stMarkdownContainer"] {{
+    min-height: 20px !important;
+    padding-top: 0rem !important;
+    padding-bottom: 0rem !important;
+}}
+
+.block-container {{
+    padding-top: 0rem !important;
+    padding-bottom: 5rem;
+    max-width: 100%;
+}}
+
+.stAppHeader {{ display: none; }}
+
+.header-container {{
+    background: #ffffff;
+    border-radius: 16px;
+    padding: 24px 20px 10px 20px;
+    margin-top: -5px !important;
+    margin-bottom: 20px;
+    text-align: center;
+}}
+
+.main-title h1 {{
+    font-family: var(--font-ui);
+    font-size: 38px !important;
+    font-weight: 700 !important;
+    color: #1a252c !important;
+    margin: 0 0 15px 0 !important;
+    padding: 0 !important;
+    line-height: 1.3 !important;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 12px;
+    letter-spacing: -0.02em;
+}}
+
+.main-title h1 span.icon {{
+    font-size: 28px;
+    filter: drop-shadow(0 2px 4px rgba(0,0,0,0.1));
+}}
+
+.sub-title {{
+    text-align: center !important;
+}}
+.sub-title h4 {{
+    font-family: var(--font-ui);
+    font-size: 18px !important;
+    font-weight: 600 !important;
+    color: #1a252c !important;
+    margin: 0 0 5px 0 !important;
+    padding: 0 !important;
+    text-align: center !important;
+}}
+.sub-title p {{
+    font-size: 14px !important;
+    color: #626d7a !important;
+    margin: 0 !important;
+    text-align: center !important;
+}}
+
+.date-picker-wrapper [data-baseweb="select"] {{
+    background-color: #f8f9fa !important;
+    border: 1px solid #e2e8f0 !important;
+    border-radius: 8px !important;
+    font-family: var(--font-ui) !important;
+    font-size: 15px !important;
+    font-weight: 500 !important;
+    color: #1a252c !important;
+    height: 40px !important;
+    padding-top: 8px !important;
+    padding-left: 10px !important;
+    box-shadow: none !important;
+    margin: 0 auto !important;
+    cursor: pointer !important;
+    caret-color: transparent !important;
+    user-select: none !important;
+}}
+.date-picker-wrapper [data-baseweb="select"]:hover {{
+    border-color: #2980b9 !important;
+}}
+.date-picker-wrapper [data-baseweb="select"] svg {{
+    fill: #1a252c !important;
+}}
+.date-picker-wrapper [data-baseweb="select"] input {{
+    cursor: pointer !important;
+    caret-color: transparent !important;
+    -webkit-user-select: none;
+    -moz-user-select: none;
+    -ms-user-select: none;
+    pointer-events: none !important;
+    user-select: none !important;
+}}
+
+/* ===== НАВИГАЦИОННЫЕ КАРТОЧКИ ГЛАВНОЙ СТРАНИЦЫ ===== */
+.nav-cards-row {{
+    display: flex;
+    justify-content: center;
+    gap: 60px;
+    margin: 25px auto 30px auto;
+    max-width: 1100px;
+}}
+.nav-card {{
+    flex: 1;
+    max-width: 530px;
+    min-height: 110px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    background-color: #ffffff;
+    border: 1px solid rgba(49, 51, 63, 0.2);
+    border-radius: 14px;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.06);
+    padding: 22px 28px;
+    text-decoration: none !important;
+    cursor: pointer;
+    transition: border-color 0.2s, transform 0.15s, box-shadow 0.2s;
+}}
+.nav-card:hover {{
+    border-color: #2980b9 !important;
+    transform: translateY(-3px);
+    box-shadow: 0 6px 16px rgba(41,128,185,0.12);
+}}
+.nav-card:active {{
+    transform: translateY(1px);
+    box-shadow: 0 1px 2px rgba(0,0,0,0.05);
+}}
+.nav-card-line1 {{
+    font-family: var(--font-ui);
+    font-size: 17px;
+    font-weight: 600;
+    color: #1a252c;
+    text-align: center;
+    line-height: 1.35;
+    margin-bottom: 6px;
+}}
+.nav-card:hover .nav-card-line1 {{
+    color: #2980b9;
+}}
+.nav-card-line2 {{
+    font-family: var(--font-text);
+    font-size: 13px;
+    font-weight: 400;
+    color: #626d7a;
+    text-align: center;
+    line-height: 1.3;
+}}
+
+/* ===== КНОПКИ ГЛАВНОЙ СТРАНИЦЫ (НИЖНИЙ РЯД) ===== */
+.home-btns-row {{
+    display: flex;
+    justify-content: center;
+    gap: 420px;
+    margin: 0 auto 20px auto;
+    max-width: 1100px;
+}}
+
+.home-btn {{
+    flex: 1;
+    max-width: 330px;
+    height: 90px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background-color: rgb(255, 255, 255);
+    border: 1px solid rgba(49, 51, 63, 0.2);
+    border-radius: 12px;
+    box-shadow: rgba(0, 0, 0, 0.05) 0px 1px 2px 0px;
+    font-family: var(--font-ui);
+    font-size: 16px;
+    font-weight: 550;
+    line-height: 1.25;
+    color: rgb(49, 51, 63);
+    text-align: center;
+    text-decoration: none;
+    cursor: pointer;
+    transition: border-color 0.2s, color 0.2s, transform 0.1s, box-shadow 0.2s;
+    box-sizing: border-box;
+}}
+
+a.home-btn {{
+    font-family: var(--font-ui);
+    font-size: 17px;
+    font-weight: 600;
+    color: #1a252c;
+    text-align: center;
+    line-height: 1.35;
+    text-decoration: none;
+}}
+
+.home-btn:hover {{
+    border-color: #2980b9;
+    color: #2980b9;
+    transform: translateY(-3px);
+    box-shadow: 0 6px 16px rgba(41,128,185,0.12);
+
+}}
+.home-btn:active {{
+    transform: translateY(1px);
+    box-shadow: 0 1px 2px 0 rgba(0,0,0,0.05);
+    background-color: #f8fafc;
+}}
+.home-btn-disabled {{
+    opacity: 0.5;
+    cursor: default;
+    pointer-events: none;
+}}
+
+/* ===== КНОПКИ ПОРТАЛА (ОБЩИЕ) ===== */
+.portal-btn, div.stButton > button {{
+    display: inline-flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    width: 300px !important;
+    height: 90px !important;
+    background-color: rgb(255, 255, 255) !important;
+    border: 1px solid rgba(49, 51, 63, 0.2) !important;
+    border-radius: 12px !important;
+    box-shadow: rgba(0, 0, 0, 0.05) 0px 1px 2px 0px !important;
+    margin: 0 !important; padding: 0 !important;
+    box-sizing: border-box !important;
+    transition: border-color 0.2s, color 0.2s, background-color 0.2s, transform 0.1s !important;
+    user-select: none !important; cursor: pointer !important;
+    text-decoration: none !important;
+}}
+.portal-btn,
+div.stButton > button,
+div.stButton > button p,
+div.stButton > button span {{
+    font-family: var(--font-ui) !important;
+    font-size: 16px !important;
+    font-weight: 550 !important;
+    font-style: normal !important;
+    line-height: 1.2 !important;
+    color: rgb(49, 51, 63) !important;
+    text-decoration: none !important;
+}}
+div.stButton > button p {{
+    margin: 0 !important;
+    padding: 0 !important;
+}}
+.portal-btn:hover, div.stButton > button:hover,
+div.stButton > button:hover p, div.stButton > button:hover span {{
+    border-color: rgb(41,128,185) !important; color: rgb(41,128,185) !important;
+    background-color: rgb(255, 255, 255) !important;
+}}
+.portal-btn:active, div.stButton > button:active,
+div.stButton > button:active p, div.stButton > button:active span {{
+    color: rgb(41,128,185) !important; border-color: rgb(41,128,185) !important;
+}}
+.portal-btn:hover, div.stButton > button:hover {{
+    border-color: #2980b9 !important;
+    color: #2980b9 !important;
+    transform: translateY(-2px) !important;
+    box-shadow: 0 4px 6px -1px rgba(41, 128, 185, 0.1), 0 2px 4px -1px rgba(41, 128, 185, 0.06) !important;
+}}
+.portal-btn:active, div.stButton > button:active {{
+    transform: translateY(1px) !important;
+    box-shadow: 0 1px 2px 0 rgba(0, 0, 0, 0.05) !important;
+    background-color: #f8fafc !important;
+}}
+div.stButton {{
+    display: flex;
+    justify-content: flex-start;
+    margin: 0 !important;
+    padding: 0 !important;
+}}
+div.stButton, [data-testid="stColumn"], [data-testid="stVerticalBlock"] {{
+    gap: 0 !important;
+}}
+
+/* ===== КНОПКИ В ЛЕВОЙ ПАНЕЛИ (СТРАНИЦЫ 2 И 3) ===== */
+.left-panel-btn {{
+    display: flex !important;
+    flex-direction: column !important;
+    align-items: center !important;
+    justify-content: center !important;
+    width: 100% !important; min-width: 100% !important; max-width: 100% !important;
+    height: auto !important; min-height: 70px !important;
+    background-color: #ffffff !important;
+    border: 1px solid rgba(49, 51, 63, 0.2) !important;
+    border-radius: 10px !important;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.05) !important;
+    padding: 12px 14px !important;
+    margin: 40px 0 20px 0 !important;
+    box-sizing: border-box !important;
+    transition: border-color 0.2s, transform 0.15s, box-shadow 0.2s !important;
+    cursor: pointer !important;
+    text-decoration: none !important;
+}}
+.left-panel-btn:hover {{
+    border-color: #2980b9 !important;
+    transform: translateY(-2px) !important;
+    box-shadow: 0 4px 10px rgba(41,128,185,0.1) !important;
+}}
+.left-panel-btn:active {{
+    transform: translateY(1px) !important;
+}}
+.left-panel-btn-line1 {{
+    font-family: var(--font-ui) !important;
+    font-size: 14px !important;
+    font-weight: 600 !important;
+    color: #1a252c !important;
+    text-align: center !important;
+    line-height: 1.3 !important;
+    text-decoration: none !important;
+}}
+.left-panel-btn:hover .left-panel-btn-line1 {{
+    color: #2980b9 !important;
+}}
+.left-panel-btn-line2 {{
+    font-family: var(--font-text) !important;
+    font-size: 12px !important;
+    font-weight: 400 !important;
+    color: #626d7a !important;
+    text-align: center !important;
+    line-height: 1.3 !important;
+    margin-top: 4px !important;
+    text-decoration: none !important;
+}}
+
+/* ===== КНОПКА «ВОЗВРАТ НА ГЛАВНУЮ СТРАНИЦУ» ===== */
+.back-btn-container {{
+    margin-top: 30px !important; 
+    margin-bottom: 15px !important; 
+    display: block !important;
+}}
+.back-btn-container div.stButton > button {{
+    width: auto !important; min-width: 180px !important; max-width: auto !important;
+    height: 40px !important; min-height: 40px !important; max-height: 40px !important;
+    border-radius: 8px !important; padding: 0 16px !important;
+    font-size: 14px !important; font-weight: 550 !important;
+}}
+.back-btn-container div.stButton {{
+    justify-content: flex-start;
+}}
+.back-btn-container div.stButton > button p,
+.back-btn-container div.stButton > button span {{
+    font-size: 14px !important;
+}}
+.back-btn-container div.stButton > button:hover {{ border-color: rgb(41,128,185) !important; color: rgb(41,128,185) !important; }}
+.back-btn-container div.stButton > button:hover p,
+.back-btn-container div.stButton > button:hover span {{ color: rgb(41,128,185) !important; }}
+.back-btn-container div.stButton > button:active {{ border-color: rgb(41,128,185) !important; color: rgb(41,128,185) !important; background-color: #f8fafc !important; transform: translateY(1px) !important; }}
+.back-btn-container div.stButton > button:active p,
+.back-btn-container div.stButton > button:active span {{ color: rgb(41,128,185) !important; }}
+
+/* ===== ССЫЛКА «ВОЗВРАТ НА ПРЕДЫДУЩУЮ СТРАНИЦУ» ===== */
+.back-link {{
+    display: inline-flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    height: 90px !important;
+    padding: 0 16px !important;
+    border-radius: 8px !important;
+    font-size: 16px !important;
+    font-weight: 550 !important;
+    font-family: var(--font-ui) !important;
+    color: rgb(49, 51, 63) !important;
+    text-decoration: none !important;
+    border: 1px solid rgba(49, 51, 63, 0.2) !important;
+    background: #fff !important;
+    cursor: pointer !important;
+    transition: border-color 0.2s, color 0.2s, transform 0.1s, box-shadow 0.2s !important;
+}}
+
+.back-link:hover {{
+    border-color: #2980b9 !important;
+    color: #2980b9 !important;
+    transform: translateY(-3px);
+    box-shadow: 0 6px 16px rgba(41,128,185,0.12);
+}}
+.back-link:active {{
+    transform: translateY(1px);
+    box-shadow: 0 1px 2px 0 rgba(0,0,0,0.05);
+    background-color: #f8fafc;
+}}
+
+/* ===== ИНДИКАТОРНЫЕ КАРТОЧКИ ===== */
+.indicators-row {{
+    display: flex;
+    gap: 40px;
+    margin-bottom: 20px;
+    margin-top: 30px;    
+    flex-wrap: nowrap;
+}}
+.indicator-card {{
+    flex: 1;
+    background: #f8f9fa;
+    border: 1px solid #e2e8f0;
+    border-radius: 12px;
+    padding: 12px 8px;
+    text-align: center;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    min-height: 75px;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.05);
+    position: relative; /* Добавлено для привязки тултипа */
+}}
+.indicator-card-tall {{
+    min-height: 98px !important;
+}}
+
+.card-line1 {{
+    font-family: var(--font-ui);
+    font-size: 17px;
+    font-weight: 600;
+    color: #2980b9;
+    line-height: 1.3;
+}}
+.card-line2 {{
+    font-family: var(--font-text);
+    font-size: 18px;
+    font-weight: 600;
+    color: #64748b;
+    margin-top: 4px;
+    margin-bottom: 4px;
+    line-height: 1.3;
+}}
+.card-line3 {{
+    font-family: var(--font-text);
+    font-size: 14px;
+    color: #64748b;
+    line-height: 1.3;
+}}
+
+div.indicator-card.indicator-card-tall {{
+  /* Подключение анимации появления */
+  animation: smoothAppear 0.4s ease-out forwards;
+
+border: #1E40AF 3px solid;
+border: #0D5C3A 3px solid;
+border: #00875A 3px solid;
+border: #02bd34 3px solid;
+box-shadow: 0 14px 12px rgba(0, 0, 0, 0.18)
+}}
+
+/* Описание анимации от 90% размера к 110% */
+@keyframes smoothAppear {{
+  from {{
+    opacity: 0;
+    transform: scale(0.90); /* Начинает с чуть меньшего размера */
+  }}
+  to {{
+    opacity: 1;
+    transform: scaleY(1.1); /* Возвращается к исходному размеру */
+  }}
+}}
+
+/* Стиль для круглой иконки «i» справа сверху */
+.info-icon {{
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 40px;
+    height: 40px;
+    border: 1px solid #cbd5e1;
+    border-radius: 50%;
+    color: #64748b;
+    font-size: 16px;
+    font-weight: bold;
+    background-color: #ffffff;
+    transition: all 0.2s;
+}}
+
+.info-icon:hover {{
+    background-color: #f1f5f9;
+    color: #1e293b;
+    border-color: #475569;
+}}
+
+/* Относительное позиционирование для иконки, чтобы подсказка привязывалась к ней */
+.info-icon-wrapper {{
+    position: absolute;
+    top: -15px;
+    right: -20px;
+    cursor: help;
+}}
+
+/* Стили для иконки тултипа при наведении*/
+.info-icon-wrapper:hover .info-icon {{
+    background-color: #f1f5f9;
+    color: #1e293b;
+    border-color: #475569;
+    border: 1px solid #02bd34;
+    font-style: italic;
+}}
+
+/* Стили для кастомного прямоугольного тултипа */
+.custom-tooltip {{
+    visibility: hidden;
+    opacity: 0;
+    position: absolute;
+    top: -34px;
+    right: 16px;
+    width: 300px; /* Фиксированная ширина блока */
+    padding: 8px 12px;
+    background-color: #ffffff;
+    color: #1e293b;
+    font-size: 14px;
+    line-height: 1.4;
+    border-radius: 8px;        /* Тот самый скругленный прямоугольник */
+    box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1);
+    box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.1), 0 8px 10px -6px rgba(0, 0, 0, 0.1); /* Воздушная современная тень */    
+    z-index: 10;
+    transition: opacity 0.5s ease, visibility 0.5s ease;
+    text-align: left;
+    border: 2px solid #f1f5f9; /* Тонкая рамка для четкости границ */
+    z-index: 100;
+    pointer-events: none; /* Чтобы тултип не перехватывал события мыши */
+}}
+
+/* Плавное появление при наведении на обертку иконки */
+.info-icon-wrapper:hover .custom-tooltip {{
+    visibility: visible;
+    opacity: 1;
+}}
+
+/* ===== SVG КАРТЫ ===== */
+@keyframes mapEntrance {{
+    from {{ opacity: 0; transform: scale(0.95) translateY(10px); }}
+    to {{ opacity: 1; transform: scale(1) translateY(0); }}
+}}
+.svg-wrapper {{ width: 100%; display: flex; justify-content: center; align-items: center; margin-top: 10px; margin-bottom: 15px; overflow: visible; }}
+.svg-wrapper svg {{ width: 100%; max-width: 100%; height: auto !important; max-height: none; display: block; overflow: visible !important; }}
+.svg-wrapper a {{ text-decoration: none; display: block; outline: none; transform-origin: center !important; transition: transform 0.25s ease, filter 0.25s ease !important; }}
+.svg-wrapper path {{ fill: #e0e0e0; stroke: #ffffff; stroke-width: 1; transition: fill 0.25s ease, stroke 0.25s ease !important; cursor: pointer; }}
+.map-label {{ font-family: var(--font-ui); font-size: 9px; font-weight: 600; fill: #111111; text-anchor: middle; pointer-events: none; user-select: none; paint-order: stroke; stroke: white; stroke-width: 1.5px; stroke-linejoin: round; }}
+.svg-wrapper a:hover {{ transform: scale(1.015) translateY(-2px) !important; filter: drop-shadow(0px 6px 10px rgba(0, 0, 0, 0.3)) !important; position: relative; z-index: 9999 !important; }}
+.svg-wrapper a:hover path {{ fill: #3498db !important; stroke: #1f5f8b !important; }}
+
+/* Тепловая карта (без интерактивности) */
+.heatmap-wrapper {{ width: 90%; display: flex; justify-content: center; align-items: center; margin-top: 10px; margin-bottom: 15px; overflow: visible; }}
+.heatmap-wrapper svg {{ width: 60%; max-width: 60%; height: auto !important; max-height: none; display: block; overflow: visible !important; }}
+.heatmap-wrapper path {{ stroke: #ffffff; stroke-width: 0.5; pointer-events: none; }}
+.heatmap-label {{ font-family: var(--font-ui); font-size: 9px; font-weight: 600; fill: #111111; text-anchor: middle; pointer-events: none; user-select: none; paint-order: stroke; stroke: white; stroke-width: 2px; stroke-linejoin: round; }}
+
+/* Карта на 50% ширины (страница 3) */
+.svg-wrapper-50 {{ width: 50%; margin: 0 auto; }}
+.svg-wrapper-50 .svg-wrapper {{ width: 100%; }}
+
+/* ===== ТЕКСТОВЫЕ БЛОКИ ГЛАВНОЙ ===== */
+.home-info-text {{
+    font-family: var(--font-text);
+    font-size: 15px;
+    color: #333;
+    line-height: 1.5;
+    text-align: center;
+    max-width: 900px;
+    margin: 0 auto 15px auto;
+}}
+
+/* ===== ЛЕГЕНДА ТЕПЛОВОЙ КАРТЫ ===== */
+.heatmap-legend {{
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 10px;
+    margin-top: 15px;
+    margin-bottom: 50px;
+    flex-wrap: wrap;
+}}
+.heatmap-legend-line {{
+    width: 45px;
+    height: 3px;
+    background-color: #e74c3c;
+    flex-shrink: 0;
+    border-radius: 2px;
+}}
+.heatmap-legend-text {{
+    font-family: var(--font-text);
+    font-size: 13px;
+    color: #333;
+    line-height: 1.3;
+}}
+
+/* ===== ТАБЛИЦЫ ===== */
+table {{ width: 100% !important; border-collapse: collapse !important; font-size: 14px !important; margin-top: 15px !important; }}
+table thead tr th {{
+    font-family: var(--font-text); font-weight: 600 !important; font-size: 14px !important;
+    background-color: #f8f9fa !important; color: #000000 !important; text-align: center !important;
+    border: 1px solid #dcdcdc !important; padding: 10px !important; vertical-align: middle !important;
+    position: sticky !important; top: 0 !important; z-index: 100 !important;
+    font-variant-numeric: lining-nums tabular-nums;
+}}
+table tbody tr td {{
+    font-family: var(--font-text); font-weight: 400 !important; font-size: 14px !important;
+    text-align: center !important; color: #222222 !important; border: 1px solid #dcdcdc !important;
+    padding: 6px !important; vertical-align: middle !important;
+    font-variant-numeric: lining-nums tabular-nums;
+}}
+table tbody tr td:first-child {{ text-align: left !important; padding-left: 15px !important; }}
+table a {{ color: #0066cc !important; text-decoration: none !important; font-weight: 500 !important; transition: color 0.15s ease; }}
+table a:hover {{ color: #004499 !important; text-decoration: underline !important; }}
+table tbody tr {{ transition: background-color 0.6s ease; }}
+table tbody tr:hover {{ background-color: #f1f7fc !important; cursor: pointer; }}
+
+.need-level-0-10 {{ background-color: #88A945 !important; }}
+.need-level-11-15 {{ background-color: #D8E4BC !important; }}
+.need-level-16-20 {{ background-color: #FFFFCC !important; }}
+.need-level-21-30 {{ background-color: #FCD5B4 !important; }}
+.need-level-31-100 {{ background-color: #E6B8B7 !important; }}
+
+@keyframes rowPulse {{ 0% {{ background-color: rgba(52, 152, 219, 0.25); }} 100% {{ background-color: transparent; }} }}
+.pulse-highlight {{ animation: rowPulse 0.6s ease-out forwards; }}
+.sort-arrow {{ display: inline-block; margin-left: 8px; font-size: 15px; vertical-align: middle; }}
+
+/* ===== ТАБЛИЦЫ УРОВНЕЙ (ЛЕВАЯ ПАНЕЛЬ) ===== */
+.weights-table, .Needs-table {{
+    font-size: 16px !important;
+}}
+.weights-table {{
+    margin-top: 80px !important;
+}}
+.Needs-table {{
+    margin-top: 140px !important;
+    margin-bottom: 67px !important;
+}}
+.weights-table thead tr th, .Needs-table thead tr th {{
+    background-color: #f1f5f9 !important;
+    padding: 8px 6px !important;
+    font-size: 14px !important;
+}}
+.weights-table tbody tr td, .Needs-table tbody tr td {{
+    padding: 7px 6px !important;
+    font-size: 14px !important;
+}}
+.weights-table tbody tr td:first-child, .Needs-table tbody tr td:first-child {{
+    text-align: center !important;
+    padding-left: 6px !important;
+}}
+
+
+
+/* ===== РАЗДЕЛИТЕЛИ ===== */
+.custom-separator {{
+    height: 1px;
+    width: 100%;
+    background: linear-gradient(to right, rgba(0,0,0,0) 0%, rgba(0,0,0,0.8) 50%, rgba(0,0,0,0) 100%);
+    margin: 20px auto;
+}}
+.custom-separator800 {{ max-width: 800px; }}
+
+/* ===== СТРАНИЦА РАЙОНА ===== */
+.district-section-title {{
+    font-family: var(--font-ui); font-size: 17px; font-weight: 600;
+    color: #1a252c; margin-top: 1px; margin-bottom: 12px;
+    text-align: center;
+}}
+.sort-caption {{
+    font-family: var(--font-text); font-size: 13px; color: #666;
+    margin-top: 5px; margin-bottom: 15px; font-weight: 400;
+    text-align: center;
+}}
+.contacts-info-card {{
+    background-color: #f8f9fa; border-left: 5px solid rgb(41,128,185);
+    padding: 20px; border-radius: 8px; margin-top: 20px;
+    max-width: 500px; box-shadow: 0 1px 3px rgba(0,0,0,0.05);
+    font-size: 14px;
+}}
+
+/* ===== ТАБЛИЦА НАСЕЛЕННЫХ ПУНКТОВ ===== */
+
+/* делаем колонки "Район" и "Населенный пункт" шириной 165px, чтобы названия НП входили без переноса*/
+#districtTable > thead > tr > th:nth-child(1), 
+#npTable > thead > tr > th:nth-child(1) {{
+    width: 165px !important;
+}}
+
+/* Стиль div для кнопок страницы 4*/
+.centered-portal-btn{{
+    display: flex; 
+    justify-content: center; 
+    margin-top: 25px;
+    width: 100%; /* Гарантирует, что контейнер занимает всю ширину колонки */
+}}
+
+/* ширина кнопок внизу страницы 4 (НП)*/
+.w400{{
+    width: 400px !important;
+}}
+
+
+/* ===== ЗАГОЛОВОК ПРАВОЙ ЧАСТИ (СТРАНИЦЫ 2 И 3) ===== */
+.right-panel-title {{
+    font-family: var(--font-ui);
+    font-size: 20px;
+    font-weight: 600;
+    color: #1a252c;
+    text-align: center;
+    margin: 40px 0 15px 0;
+    line-height: 1.35;
+}}
+
+/* ===== ФУТЕР ===== */
+.footer {{
+    width: calc(100% + 10rem) !important; margin-left: -5rem !important; margin-right: -5rem !important;
+    position: relative;
+    background-color: #1e293b;
+    text-align: center;
+    padding: 30px 20px 35px 20px; font-size: 15px;
+    color: #cbd5e1;
+    border-top: 1px solid #334155; margin-top: 60px; margin-bottom: -5rem !important;
+    font-family: var(--font-text); font-variant-numeric: lining-nums tabular-nums;
+}}
+.footer strong {{
+    color: #38bdf8 !important;
+    background: rgba(56, 189, 248, 0.15);
+    border: 1px solid rgba(56, 189, 248, 0.4);
+    padding: 3px 10px;
+    margin-left: 5px; border-radius: 6px; font-weight: 600; display: inline-block;
+    font-family: var(--font-ui);
+}}
+
+th {{
+    -webkit-user-select: none;
+    -moz-user-select: none;
+    -ms-user-select: none;
+    user-select: none;
+    cursor: pointer;
+}}
+
+.content-spacer {{ display: none !important; }}
+
+.left-panel-section {{
+    padding-right: 5px;
+}}
+
+/* ===== КОНТЕЙНЕР ТАБЛИЦЫ КОНТАКТОВ ===== */
+.contacts-table-container {{
+    max-width: 900px; 
+    margin: 25px auto 0 auto; 
+    background: #ffffff;
+    border: 1px solid #e2e8f0; 
+    border-radius: 14px;
+    box-shadow: 0 4px 20px rgba(0,0,0,0.08);
+    overflow: hidden;
+    animation: contactsFadeIn 0.3s ease;
+    scroll-margin-bottom: 50px;
+}}
+@keyframes contactsFadeIn {{ from {{ opacity: 0; transform: translateY(-10px); }} to {{ opacity: 1; transform: translateY(0); }} }}
+.contacts-table-header {{
+    display: flex; 
+    align-items: center; 
+    justify-content: space-between;
+    padding: 16px 24px; 
+    border-bottom: 1px solid #e2e8f0;
+    font-family: var(--font-ui); 
+    font-size: 16px; 
+    font-weight: 600; 
+    color: #1a252c;
+}}
+.contacts-table-close {{
+    font-size: 20px; color: #626d7a; text-decoration: none !important;
+    cursor: pointer; padding: 2px 8px; border-radius: 6px;
+    transition: background-color 0.15s, color 0.15s; line-height: 1;
+}}
+.contacts-table-close:hover {{ background-color: #f1f5f9; color: #1a252c; }}
+.contacts-table-container table {{ margin: 0 !important; }}
+.contacts-table-container table thead tr th {{ background-color: #f8f9fa !important; }}
+.contacts-table-container table tbody tr td:first-child {{
+    text-align: center !important; padding-left: 6px !important;
+}}
+.contacts-header{{
+margin: 0 auto;
+}}
+div.stButton > button.portal-streamlit-btn:hover {{
+    border-color: #2980b9 !important; 
+    color: #2980b9 !important;
+    transform: translateY(-2px) !important;
+    box-shadow: 0 4px 6px -1px rgba(41,128,185,0.1), 0 2px 4px -1px rgba(41,128,185,0.06) !important;
+}}
+div.stButton > button.portal-streamlit-btn:hover p,
+div.stButton > button.portal-streamlit-btn:hover span {{
+    color: #2980b9 !important;
+}}
+</style>
+""", unsafe_allow_html=True)
+
+# =============================================================================
+# 8. JS СКРИПТ ДЛЯ СОРТИРОВКИ ТАБЛИЦ
+# =============================================================================
+sorting_script = """
+<script>
+const parentDoc = window.parent.document;
+try {
+    if (parentDoc) {
+        parentDoc.documentElement.lang = 'ru';
+        const mainAppContainer = parentDoc.querySelector('.block-container') || parentDoc.querySelector('section.main');
+        if (mainAppContainer && !mainAppContainer.hasAttribute('role')) {
+            mainAppContainer.setAttribute('role', 'main');
+        }
+    }
+} catch (e) {}
+
+function lockSelectInput() {
+    const inputs = parentDoc.querySelectorAll('.date-picker-wrapper input');
+    inputs.forEach(input => {
+        if (!input.readOnly) {
+            input.readOnly = true;
+        }
+        input.style.caretColor = 'transparent';
+        input.style.cursor = 'pointer';
+    });
+}
+
+function makeSortable(tableId) {
+    const table = parentDoc.getElementById(tableId);
+    if (!table || !table.tBodies || !table.tBodies[0]) return;
+    const tbody = table.tBodies[0];
+    const headers = Array.from(table.tHead.rows[0].cells);
+    headers.forEach((header, index) => {
+        if (header.dataset.sortInitialized === "true") return;
+        header.dataset.sortInitialized = "true";
+        let asc = true;
+        header.style.cursor = "pointer";
+        header.onclick = () => {
+            const rows = Array.from(tbody.rows);
+            rows.sort((a, b) => {
+                if (!a.cells[index] || !b.cells[index]) return 0;
+                let v1 = a.cells[index].innerText.trim();
+                let v2 = b.cells[index].innerText.trim();
+                let n1 = parseFloat(v1.replace(",", "."));
+                let n2 = parseFloat(v2.replace(",", "."));
+                if (!isNaN(n1) && !isNaN(n2)) return asc ? n1 - n2 : n2 - n1;
+                return asc ? v1.localeCompare(v2, 'ru') : v2.localeCompare(v1, 'ru');
+            });
+            rows.forEach(row => tbody.appendChild(row));
+            headers.forEach(h => {
+                const existingArrow = h.querySelector(".sort-arrow");
+                if (existingArrow) existingArrow.remove();
+                h.style.setProperty('background-color', '#f8f9fa', 'important');
+            });
+            if (asc) { header.style.setProperty('background-color', '#e8f8f5', 'important'); }
+            else { header.style.setProperty('background-color', '#fdedec', 'important'); }
+            const arrowSpan = parentDoc.createElement("span");
+            arrowSpan.className = "sort-arrow";
+            arrowSpan.innerHTML = asc ? "&#9650;" : "&#9660;";
+            arrowSpan.style.color = asc ? "#27ae60" : "#e74c3c";
+            header.appendChild(arrowSpan);
+            rows.forEach(row => {
+                row.classList.remove("pulse-highlight");
+                void row.offsetWidth;
+                row.classList.add("pulse-highlight");
+                setTimeout(() => { row.classList.remove("pulse-highlight"); }, 600);
+            });
+            asc = !asc;
+        };
+    });
+}
+
+setInterval(() => {
+    makeSortable("mainTable");
+    makeSortable("npTable");
+    makeSortable("districtTable");
+    lockSelectInput();
+}, 500);
+
+</script>
+"""
+
+# =============================================================================
+# 9. ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
+# =============================================================================
+def _cell(df_ind, row, col):
+    try:
+        val = df_ind.iloc[row, col]
+        if pd.isna(val):
+            return ""
+        if isinstance(val, float):
+            if val == int(val):
+                return str(int(val))
+            return str(val)
+        return str(val)
+    except Exception:
+        return ""
+
+def build_page2_indicators_html(df_ind):
+    if df_ind is None:
+        return '<div style="padding:10px;text-align:center;color:#999;">Данные показателей не найдены</div>'
+    
+    tooltips_p2 = {
+        0: "С учетом населенных пунктов с численностью населения от 100 человек и без учета городов",
+        2: "Головной офис, филиал, внутреннее структурное подразделение банка; мобильный банковский офис; удаленная точка с банковским работником",
+        3: "Стационарное отделение почтовой связи, передвижные отделения почтовой связи",
+        4: "Автоматические устройства для осуществления расчетов, обеспечивающие возможность выдачи и (или) приема наличных денежных средств, в том числе с использованием электронных средств платежа, и по передаче распоряжения банку об осуществлении перевода денежных средств",
+        5: "Наличие возможности в торговой точке при оплате товара банковской картой дополнительно воспользоваться услугой по снятию наличных с банковской карты (Доступно для ЮЛ и ИП с системой налогообложения ОСН и патент)"
+    }
+    
+    html = '<div class="indicators-row">'
+    
+    # Первая высокая карточка (колонка 0)
+    tip_0 = tooltips_p2.get(0, "Подсказка")
+    html += f'<div class="indicator-card indicator-card-tall">' \
+            f'<div class="info-icon-wrapper">' \
+            f'<span class="info-icon">i</span>' \
+            f'<div class="custom-tooltip">{tip_0}</div>' \
+            f'</div>' \
+            f'<div class="card-line1">{_cell(df_ind,0,0)}</div>' \
+            f'<div class="card-line2">{_cell(df_ind,1,0)}</div>' \
+            f'<div class="card-line3">{_cell(df_ind,2,0)}</div>' \
+            f'</div>'
+    
+    # Остальные карточки (колонки 2, 3, 4, 5)
+    for col in [2, 3, 4, 5]:
+        tip = tooltips_p2.get(col, f"Подсказка для показателя {col}")
+        html += f'<div class="indicator-card">' \
+                f'<div class="info-icon-wrapper">' \
+                f'<span class="info-icon">i</span>' \
+                f'<div class="custom-tooltip">{tip}</div>' \
+                f'</div>' \
+                f'<div class="card-line1">{_cell(df_ind,0,col)}</div>' \
+                f'<div class="card-line2">{_cell(df_ind,1,col)}</div>' \
+                f'<div class="card-line3">{_cell(df_ind,2,col)}</div>' \
+                f'</div>'
+                
+    html += '</div>'
+    return html
+
+def build_page3_indicators_html(df_ind):
+    if df_ind is None:
+        return '<div style="padding:10px;text-align:center;color:#999;">Данные показателей не найдены</div>'
+    
+    tooltips_p3 = {
+        1: "С учетом населенных пунктов с численностью населения от 100 человек и без учета городов",
+        6: "Определение точки финансового доступа",
+        7: "Определение финансового помощника"
+    }
+    
+    html = '<div class="indicators-row">'
+    
+    # Первая карточка (колонка 1)
+    tip_1 = tooltips_p3.get(1, "Подсказка")
+    html += f'<div class="indicator-card indicator-card-tall">' \
+            f'<div class="info-icon-wrapper">' \
+            f'<span class="info-icon">i</span>' \
+            f'<div class="custom-tooltip">{tip_1}</div>' \
+            f'</div>' \
+            f'<div class="card-line1">{_cell(df_ind,0,1)}</div>' \
+            f'<div class="card-line2">{_cell(df_ind,1,1)}</div>' \
+            f'<div class="card-line3">{_cell(df_ind,2,1)}</div>' \
+            f'</div>'
+    
+    # Остальные карточки (колонки 6, 7)
+    for col in [6, 7]:
+        tip = tooltips_p3.get(col, f"Подсказка для показателя {col}")
+        html += f'<div class="indicator-card">' \
+                f'<div class="info-icon-wrapper">' \
+                f'<span class="info-icon">i</span>' \
+                f'<div class="custom-tooltip">{tip}</div>' \
+                f'</div>' \
+                f'<div class="card-line1">{_cell(df_ind,0,col)}</div>' \
+                f'<div class="card-line2">{_cell(df_ind,1,col)}</div>' \
+                f'<div class="card-line3">{_cell(df_ind,2,col)}</div>' \
+                f'</div>'
+                
+    html += '</div>'
+    return html
+
+def render_footer():
+    st.markdown(f"""
+    <div class="footer">
+        🏦 Информационный портал финансовой доступности | Разработано для органов государственной власти Новосибирской области | Посещений портала: <strong>{st.session_state.visit_count}</strong>
+    </div>
+    """, unsafe_allow_html=True)
+
+# =============================================================================
+# СЦЕНАРИЙ №1: ГЛАВНАЯ СТРАНИЦА
+# =============================================================================
+if st.session_state.page == 'home':
+    st.markdown("""
+    <div class="header-container">
+        <div class="main-title">
+            <h1>Информационная панель<br>доступности финансовых услуг в сельской местности<br>на территории Новосибирской области </h1>
+        </div>
+        <div class="sub-title">
+            <h4>Новосибирская область</h4>
+            <p>30 муниципальных образований, 876 населенных пунктов (без учета городов и с численностью населения от 100 человек)</p>
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    _, center_col, _ = st.columns([5.8, 1, 6])
+    with center_col:
+        st.markdown('<div class="date-picker-wrapper">', unsafe_allow_html=True)
+#        dates_list = ["01.01.2025", "01.07.2025", "01.01.2026"]
+
+        # 1. Получаем список дат для выбора (отсортированный)
+#        dates_list = list(config.get("reporting_dates", {}).keys())
+
+        st.selectbox(
+            "Отчетная дата",
+            dates_list,
+            label_visibility="collapsed",
+            key="selected_date",
+            index=dates_list.index(current_date) if current_date in dates_list else 0,
+            on_change=set_date_param
+        )
+        st.markdown('</div>', unsafe_allow_html=True)
+
+    # Навигационные карточки
+    st.markdown(f"""
+    <div class="nav-cards-row">
+        <a href="?page=page2&date={current_date}" class="nav-card" target="_self">
+            <div class="nav-card-line1">Уровень финансовой доступности</div>
+            <div class="nav-card-line2">Расчет в соответствии с Методикой Банка России</div>
+        </a>
+        <a href="?page=page3&date={current_date}" class="nav-card" target="_self">
+            <div class="nav-card-line1">Уровень потребности в развитии дистанционного банковского обслуживания</div>
+            <div class="nav-card-line2">Расчет в соответствии с подходами Сибирского ГУ Банка России</div>
+        </a>
+    </div>
+    """, unsafe_allow_html=True)
+
+    st.markdown('<div class="custom-separator custom-separator800"></div>', unsafe_allow_html=True)
+
+    st.markdown("""
+    <div class="home-info-text">
+        Информационная панель доступности финансовых услуг в сельской местности на территории Новосибирской области — …
+        <br><br><br><br><br><br><br><br>
+    </div>
+    """, unsafe_allow_html=True)
+
+    st.markdown("""
+    <div class="home-info-text">
+        Для кого создается и чем будет полезна…
+        <br><br><br><br><br><br><br><br>
+    </div>
+    """, unsafe_allow_html=True)
+
+    st.markdown("<div style='margin-top: 40px;'></div>", unsafe_allow_html=True)
+
+    # --- Кнопки нижнего ряда (чистый HTML, выравнивание по навигационным карточкам) ---
+# --- Кнопки нижнего ряда (управляются через JS без перезагрузки) ---
+    if b64_manual:
+        st.markdown(f"""
+        <div class="home-btns-row">
+            <a class="home-btn" href="data:application/zip;base64,{b64_manual}" download="Руководство пользователя.zip" target="_self">
+                📖 Руководство пользователя
+            </a>
+            <a class="home-btn" id="show-contacts-btn" href="javascript:void(0);">
+                👥 Контакты представителей<br>Сибирского ГУ Банка России
+            </a>
+        </div>
+        """, unsafe_allow_html=True)
+    else:
+        st.markdown(f"""
+        <div class="home-btns-row">
+            <div class="home-btn home-btn-disabled">
+                📖 Руководство пользователя
+            </div>
+            <a class="home-btn" id="show-contacts-btn" href="javascript:void(0);">
+                👥 Контакты представителей<br>Сибирского ГУ Банка России
+            </a>
+        </div>
+        """, unsafe_allow_html=True)
+
+    # --- Таблица контактов ---
+# --- Таблица контактов (скрыта по умолчанию) ---
+    st.markdown(f"""
+    <div class="contacts-table-container" id="contacts-table-container" style="display: none;">
+        <div class="contacts-table-header">
+            <span class="contacts-header">Контакты представителей Сибирского ГУ Банка России</span>
+            <a href="javascript:void(0)" class="contacts-table-close" id="close-contacts-btn" title="Закрыть">&times;</a>
+        </div>
+        <table>
+            <thead>
+                <tr>
+                    <th>Должность</th>
+                    <th style="width: 160px;">ФИО</th>
+                    <th style="width: 120px;">Телефон</th>
+                    <th style="width: 180px;">Электронная почта</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td>Начальник Управления платежных систем и расчетов</td>
+                    <td>Барбанакова<br>Надежда Алексеевна</td>
+                    <td>(383) 217-63-56</td>
+                    <td><a href="mailto:BarabanakovaNA@cbr.ru">BarabanakovaNA@cbr.ru</a></td>
+                </tr>
+                <tr>
+                    <td>Заместитель начальника Управления - начальник отдела развития национальной платежной системы</td>
+                    <td>Лысенко<br>Роман Юрьевич</td>
+                    <td>(383) 217-63-49</td>
+                    <td><a href="mailto:LysenkoRY@cbr.ru">LysenkoRY@cbr.ru</a></td>
+                </tr>
+                <tr>
+                    <td>Руководитель направления</td>
+                    <td>Ермошина<br>Елена Сергеевна</td>
+                    <td>(383) 217-67-59</td>
+                    <td><a href="mailto:ErmoshinaES@cbr.ru">ErmoshinaES@cbr.ru</a></td>
+                </tr>
+            </tbody>
+        </table>
+    </div>
+    """, unsafe_allow_html=True)
+
+    # JS-обработчик для мгновенного открытия и закрытия таблицы без перезагрузки
+    components.html("""
+    <script>
+    const parentDoc = window.parent.document;
+    
+    const showBtn = parentDoc.getElementById('show-contacts-btn');
+    const closeBtn = parentDoc.getElementById('close-contacts-btn');
+    const container = parentDoc.getElementById('contacts-table-container');
+
+    if (showBtn && container) {
+        showBtn.onclick = function(e) {
+            e.preventDefault();
+            container.style.display = 'block';
+            container.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+        };
+    }
+
+    if (closeBtn && container) {
+        closeBtn.onclick = function(e) {
+            e.preventDefault();
+            container.style.display = 'none';
+        };
+    }
+    </script>
+    """, height=0)
+
+    render_footer()
+
+# =============================================================================
+# СЦЕНАРИЙ №2: УРОВЕНЬ ФИНАНСОВОЙ ДОСТУПНОСТИ
+# =============================================================================
+elif st.session_state.page == 'page2':
+    from_page = query_params.get("from_page", "home")
+    if isinstance(from_page, list):
+        from_page = from_page[0]
+
+    if from_page in ('page2', 'page3'):
+        back_href = f"?page={from_page}&date={current_date}"
+    else:
+        back_href = f"?date={current_date}"
+
+    st.markdown(f'''
+    <div class="back-btn-container">
+        <a href="{back_href}" class="back-link">⬅️ Возврат на предыдущую страницу</a>
+    </div>
+    ''', unsafe_allow_html=True)
+
+    # Индикаторные карточки
+    st.markdown(build_page2_indicators_html(df_indicators), unsafe_allow_html=True)
+
+    # Три колонки: 20% — 10% — 70%
+    left_col, mid_col, right_col = st.columns([2, 1, 7])
+
+    with left_col:
+        st.markdown('<div class="left-panel-section">', unsafe_allow_html=True)
+
+        # Кнопка «Список муниципальных образований… / Выгрузить в Excel»
+        if b64_excel_f:
+            safe_date = current_date.replace(".", "-")
+            st.markdown(f"""
+            <a class="left-panel-btn" href="data:application/vnd.openxmlformats-officedocument.spreadsheetml.sheet;base64,{b64_excel_f}" download="NSO_f_regions_{current_date}.xlsx">
+                <div class="left-panel-btn-line1">Список муниципальных образований Новосибирской области</div>
+                <div class="left-panel-btn-line2">Выгрузить в Excel</div>
+            </a>
+            """, unsafe_allow_html=True)
+        else:
+            st.markdown("""
+            <div class="left-panel-btn" style="opacity:0.5; cursor:default; pointer-events:none;">
+                <div class="left-panel-btn-line1">Список муниципальных образований Новосибирской области</div>
+                <div class="left-panel-btn-line2">Выгрузить в Excel (файл не найден)</div>
+            </div>
+            """, unsafe_allow_html=True)
+
+        # Кнопка «Интерактивная карта СФО»
+        if b64_sfo_map:
+            st.markdown(f"""
+            <a class="left-panel-btn" href="Интерактивная карта СФО.xlsm" download="Интерактивная карта СФО.xlsm">
+                <div class="left-panel-btn-line1">Интерактивная карта Финансовой доступности <br> в разрезе субъектов <br> Сибирского Федерального Округа</div>
+            </a>
+            """, unsafe_allow_html=True)
+        else:
+            st.markdown("""
+            <div class="left-panel-btn" style="opacity:0.5; cursor:default; pointer-events:none;">
+                <div class="left-panel-btn-line1">Интерактивная карта Финансовой доступности <br> в разрезе субъектов <br> Сибирского Федерального Округа (файл не найден)</div>
+            </div>
+            """, unsafe_allow_html=True)
+
+        # Таблица уровней
+        st.markdown("""
+        <table id="weights" class="weights-table" style="width: 100% !important;">
+            <thead>
+                <tr>
+                    <th>Уровень финансовой доступности</th>
+                    <th>Значение, %</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr><td>Хороший</td><td style="background-color: #88A945;">86 – 100</td></tr>
+                <tr><td>Выше среднего</td><td style="background-color: #D8E4BC;">66 – 85</td></tr>
+                <tr><td>Средний</td><td style="background-color: #FFFFCC;">46 – 65</td></tr>
+                <tr><td>Ниже среднего</td><td style="background-color: #FCD5B4;">31 – 45</td></tr>
+                <tr><td>Недостаточный</td><td style="background-color: #E6B8B7;">0 – 30</td></tr>
+            </tbody>
+        </table>
+        """, unsafe_allow_html=True)
+
+        st.markdown('</div>', unsafe_allow_html=True)
+
+    with mid_col:
+        st.empty()
+
+    with right_col:
+        st.markdown('<div class="right-panel-title">Тепловая карта уровня финансовой доступности на территории Новосибирской области</div>', unsafe_allow_html=True)
+
+        if heatmap_svg:
+            st.markdown(f'<div class="heatmap-wrapper">{heatmap_svg}</div>', unsafe_allow_html=True)
+        else:
+            st.warning(f"Файл тепловой карты {HEATMAP_SVG_FILE} не найден.")
+
+        st.markdown("""
+        <div class="heatmap-legend">
+            <div class="heatmap-legend-line"></div>
+            <span class="heatmap-legend-text">Границы районов с концентрацией более 30% населенных пунктов с уровнем финансовой доступности 65% и ниже</span>
+        </div>
+        """, unsafe_allow_html=True)
+
+    render_footer()
+
+# =============================================================================
+# СЦЕНАРИЙ №3: УРОВЕНЬ ПОТРЕБНОСТИ В ДБО
+# =============================================================================
+elif st.session_state.page == 'page3':
+    st.markdown('<div class="back-btn-container">', unsafe_allow_html=True)
+    if st.button("⬅️ Возврат на главную страницу"):
+        go_home()
+        st.rerun()
+    st.markdown('</div>', unsafe_allow_html=True)
+
+    # Индикаторные карточки
+    st.markdown(build_page3_indicators_html(df_indicators), unsafe_allow_html=True)
+
+    # Три колонки: 20% — 10% — 70%
+    left_col, mid_col, right_col = st.columns([2, 1, 7])
+
+    with left_col:
+        st.markdown('<div class="left-panel-section">', unsafe_allow_html=True)
+
+        # Кнопка «Список муниципальных образований… / Выгрузить в Excel»
+        if b64_excel_p:
+            st.markdown(f"""
+            <a class="left-panel-btn" href="data:application/vnd.openxmlformats-officedocument.spreadsheetml.sheet;base64,{b64_excel_p}" download="NSO_p_regions_{current_date}.xlsx">
+                <div class="left-panel-btn-line1">Список муниципальных образований Новосибирской области</div>
+                <div class="left-panel-btn-line2">Выгрузить в Excel</div>
+            </a>
+            """, unsafe_allow_html=True)
+        else:
+            st.markdown("""
+            <div class="left-panel-btn" style="opacity:0.5; cursor:default; pointer-events:none;">
+                <div class="left-panel-btn-line1">Список муниципальных образований Новосибирской области</div>
+                <div class="left-panel-btn-line2">Выгрузить в Excel (файл не найден)</div>
+            </div>
+            """, unsafe_allow_html=True)
+
+        # Таблица уровней потребности
+        st.markdown("""
+        <table id="Needs" class="Needs-table" style="width: 100% !important;">
+            <thead>
+                <tr>
+                    <th>Уровень потребности в развитии дистанционного банковского обслуживания</th>
+                    <th  style="width: 100px">Значение, %</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr><td>Низкий</td><td style="background-color: #88A945;">0 – 10</td></tr>
+                <tr><td>Выше низкого</td><td style="background-color: #D8E4BC;">11 – 15</td></tr>
+                <tr><td>Средний</td><td style="background-color: #FFFFCC;">16 – 20</td></tr>
+                <tr><td>Выше среднего</td><td style="background-color: #FCD5B4;">21 – 30</td></tr>
+                <tr><td>Высокий</td><td style="background-color: #E6B8B7;">31 – 100</td></tr>
+            </tbody>
+        </table>
+        """, unsafe_allow_html=True)
+
+        st.markdown('</div>', unsafe_allow_html=True)
+
+    with mid_col:
+        st.empty()
+
+    with right_col:
+        st.markdown('<div class="right-panel-title">Интерактивная карта распределения уровня потребности в развитии<br>дистанционного банковского обслуживания на территории Новосибирской области</div>', unsafe_allow_html=True)
+
+        if interactive_svg:
+            st.markdown(f'<div class="svg-wrapper-50"><div class="svg-wrapper">{interactive_svg}</div></div>', unsafe_allow_html=True)
+        else:
+            st.warning(f"Файл карты {SVG_FILE} не найден.")
+
+    render_footer()
+
+# =============================================================================
+# СЦЕНАРИЙ №4: СТРАНИЦА РАЙОНА
+# =============================================================================
+elif st.session_state.page == 'district':
+    region_id = st.session_state.selected_region
+
+    from_page = query_params.get("from_page", "home")
+    if isinstance(from_page, list):
+        from_page = from_page[0]
+
+    if from_page in ('page2', 'page3'):
+        back_href = f"?page={from_page}&date={current_date}"
+    else:
+        back_href = f"?date={current_date}"
+
+    st.markdown(f'''
+    <div class="back-btn-container">
+        <a href="{back_href}" target="_self" class="back-link">⬅️ Возврат на предыдущую страницу</a>
+    </div>
+    ''', unsafe_allow_html=True)
+
+    if not display_df.empty:
+        region_row = display_df[display_df['ID'].astype(str).str.strip() == str(region_id).strip()]
+
+        if not region_row.empty:
+            region_name = region_row['Район'].values[0]
+
+            st.markdown(f'<h2 style="font-family: var(--font-ui); text-align: center; font-size: 28px !important; font-weight: 700; color: #1a252c; margin-top: 20px; margin-bottom: 5px; letter-spacing: -0.01em;">{region_name}</h2>', unsafe_allow_html=True)
+
+            cols_to_show = [col for col in region_row.columns if col != 'ID']
+            np_display_cols = []
+            for col in cols_to_show:
+                if col == "Район":
+                    np_display_cols.append("Населенный пункт")
+                else:
+                    np_display_cols.append(col)
+
+            df_np_region = pd.DataFrame()
+            if df_np_all is None:
+                st.error(f"❌ Файл {NP_FILE} не найден.")
+            else:
+                mask = df_np_all["Район"].astype(str).str.strip() == str(region_name).strip()
+                available_cols = [c for c in np_display_cols if c in df_np_all.columns]
+                df_np_region = df_np_all[mask][available_cols].copy()
+                if "Населенный пункт" in df_np_region.columns:
+                    df_np_region = df_np_region.sort_values("Населенный пункт").reset_index(drop=True)
+
+            b64_np_excel = convert_df_to_excel_b64(df_np_region, sheet_name='Населенные пункты') if not df_np_region.empty else ""
+
+            st.markdown(f'<div class="district-section-title">Количество населенных пунктов: {len(df_np_region)}</div>', unsafe_allow_html=True)
+            st.markdown('<div style="font-family: var(--font-ui); font-size: 16px; font-weight: 600; color: #1a252c; margin-top: 10px; margin-bottom: 8px; text-align: center;">(без городов и с численностью населения от 100 чел.)</div>', unsafe_allow_html=True)
+            st.markdown(f'<h5 style="font-family: var(--font-ui); text-align: center; font-size: 16px !important; font-weight: 600; color: #1a252c; margin-top: 10px; margin-bottom: 10px; letter-spacing: 0.05em;">на {current_date}</h5>', unsafe_allow_html=True)
+
+            st.markdown('<div class="custom-separator"></div>', unsafe_allow_html=True)
+
+            district_row_data = region_row[cols_to_show].copy()
+            dist_headers = list(cols_to_show)
+            dist_header_html = "".join(f"<th>{c}</th>" for c in dist_headers)
+
+            # --- ФОРМИРОВАНИЕ СТРОКИ НСО ---
+            nso_row_html = ""
+            if df_nso_summary is not None and not df_nso_summary.empty:
+                nso_row = df_nso_summary.iloc[0]
+                nso_cells = ""
+                for col in cols_to_show:
+                    if col == "Район":
+                        nso_cells += f'<td style="font-weight: 700 !important;">Новосибирская область</td>'
+                        continue
+                    val = nso_row.get(col, "")
+                    if str(col).startswith(("Уровень", "Изменение уровня")) and pd.notna(val):
+                        try:
+                            num_val = float(str(val).replace('%', '').replace(',', '.').strip())
+                            if num_val <= 1.0:
+                                num_val *= 100
+                            css_class = get_need_level_class(col, num_val)
+                            nso_cells += f'<td class="{css_class}">{num_val:.1f}%</td>'
+                        except Exception:
+                            nso_cells += f'<td>{val}</td>'
+                    else:
+                        nso_cells += f'<td>{val if pd.notna(val) else ""}</td>'
+                nso_row_html = f'<tr style="background-color: #e8f4f8">{nso_cells}</tr>'
+
+            # --- ФОРМИРОВАНИЕ СТРОКИ РАЙОНА ---
+            dist_cells = ""
+            for col in cols_to_show:
+                val = district_row_data[col].values[0]
+                if str(col).startswith(("Уровень", "Изменение уровня")) and pd.notna(val):
+                    try:
+                        num_val = float(str(val).replace('%', '').replace(',', '.').strip())
+                        if num_val <= 1.0:
+                            num_val *= 100
+                        css_class = get_need_level_class(col, num_val)
+                        dist_cells += f'<td class="{css_class}">{num_val:.1f}%</td>'
+                    except Exception:
+                        dist_cells += f'<td>{val}</td>'
+                else:
+                    dist_cells += f'<td>{val if pd.notna(val) else ""}</td>'
+
+            district_table_html = f"""
+            <table id="districtTable">
+                <thead><tr>{dist_header_html}</tr></thead>
+                <tbody>
+                    {nso_row_html}
+                    <tr>{dist_cells}</tr>
+                </tbody>
+            </table>
+            """
+            st.markdown(district_table_html, unsafe_allow_html=True)
+
+            # --- ТАБЛИЦА «УДЕЛЬНЫЕ ВЕСА» ---
+            st.markdown("""
+            <div style="display: flex; flex-direction: column; align-items: center; margin-top: 40px; margin-bottom: 40px;">
+                <div style="font-family: var(--font-ui); font-size: 18px; font-weight: 600; margin-bottom: 15px; color: #1a252c;">
+                    Величина поправочного коэффициента к уровню потребности в развитии дистанционного банковского обслуживания в зависимости от уровня финансовой доступности населенного пункта
+                </div>
+                <div style="max-width: 900px; width: 100%;">
+                    <table id="weights_np" class="weights-table" style="width: 100% !important;">
+                        <thead>
+                            <tr>
+                                <th>Уровень финансовой доступности</th>
+                                <th>Значение, %</th>
+                                <th>Наличие Точки финансового доступа</th>
+                                <th>Присутствие Финансового помощника, %</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <tr><td>Хороший</td><td>86 – 100</td><td>0</td><td>2</td></tr>
+                            <tr><td>Выше среднего</td><td>66 – 85</td><td>1</td><td>3</td></tr>
+                            <tr><td>Средний</td><td>46 – 65</td><td>2</td><td>4</td></tr>
+                            <tr><td>Ниже среднего</td><td>31 – 45</td><td>3</td><td>5</td></tr>
+                            <tr><td>Недостаточный</td><td>0 – 30</td><td>4</td><td>6</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
+
+            st.markdown("<div style='margin-top: 20px;'></div>", unsafe_allow_html=True)
+            st.markdown('<div class="district-section-title">Населенные пункты</div>', unsafe_allow_html=True)
+            st.markdown('<div class="sort-caption">(работает сортировка по нажатию на заголовки)</div>', unsafe_allow_html=True)
+
+            if not df_np_region.empty:
+                np_headers_html = "".join(f"<th>{c}</th>" for c in available_cols)
+                np_rows_html = ""
+                for _, row in df_np_region.iterrows():
+                    cells = ""
+                    for col in available_cols:
+                        val = row[col]
+                        if pd.notna(val) and str(col).startswith(("Уровень", "Изменение уровня")):
+                            try:
+                                num_val = float(str(val).replace('%', '').replace(',', '.').strip())
+                                if num_val <= 1.0:
+                                    num_val = num_val * 100
+                                css_class = get_need_level_class(col, num_val)
+                                cells += f'<td class="{css_class}">{num_val:.1f}%</td>'
+                            except (ValueError, TypeError):
+                                cells += f'<td>{val}</td>'
+                        else:
+                            cells += f'<td>{val if pd.notna(val) else ""}</td>'
+                    np_rows_html += f'<tr>{cells}</tr>\n'
+
+                np_table_html = f"""
+                <table id="npTable">
+                    <thead><tr>{np_headers_html}</tr></thead>
+                    <tbody>{np_rows_html}</tbody>
+                </table>
+                """
+                st.markdown(np_table_html, unsafe_allow_html=True)
+
+            st.markdown("<div style='margin-top: 30px;'></div>", unsafe_allow_html=True)
+
+            # Кнопки выгрузки на странице района
+            btn_col1, btn_col2, btn_col3 = st.columns([1, 1, 1])
+
+            with btn_col1:
+                if b64_tfd:
+                    st.markdown(
+                        f'''<div class="centered-portal-btn">
+                                <a class="portal-btn w400" href="data:application/zip;base64,{b64_tfd}" download="Как открыть ТФД.zip">📖 Как открыть Точку финансового доступа</a>
+                            </div>''', 
+                        unsafe_allow_html=True
+                    )
+
+            with btn_col2:
+                if b64_fp:
+                    st.markdown(
+                        f'''<div class="centered-portal-btn">
+                                <a class="portal-btn w400" href="data:application/zip;base64,{b64_fp}" download="Как назначить ФП.zip">📖 Как назначить Финансового помощника</a>
+                            </div>''', 
+                        unsafe_allow_html=True
+                    )
+
+            with btn_col3:
+                if b64_tcash:
+                    st.markdown(
+                        f'''<div class="centered-portal-btn">
+                                <a class="portal-btn w400" href="data:application/zip;base64,{b64_tcash}" download="Как подключить точку кэшаут.zip">📖 Как подключить точку кэшаут</a>
+                            </div>''', 
+                        unsafe_allow_html=True
+                    )
+
+        render_footer()
+
+# =============================================================================
+# ИНЪЕКЦИЯ JS-СКРИПТА СОРТИРОВКИ
+# =============================================================================
+components.html(sorting_script, height=0)
