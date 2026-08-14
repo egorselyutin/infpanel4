@@ -5,6 +5,7 @@ import io
 import json
 import base64
 import sqlite3
+import html
 import streamlit.components.v1 as components
 from bs4 import BeautifulSoup
 from svgpathtools import parse_path
@@ -104,6 +105,17 @@ if 'visit_counted' not in st.session_state:
 # Константы
 # цвет шрифта пилотного района
 DARK_FONT_REGION_COLOR = "#02bd34"
+
+# Колонки таблицы населенных пунктов (npTable), которые на странице района
+# отображаются в виде переключателя "да/нет" со стрелочками вверх-вниз
+# вместо числового значения. При переключении значения в npTable
+# автоматически пересчитывается суммарное количество "да" в соответствующей
+# колонке таблицы района (districtTable).
+TOGGLE_YES_NO_COLUMNS = [
+    "Количество точек финансового доступа",
+    "Количество Финансовых помощников",
+    "Количество торговых точек с сервисом \"Выдача наличных на кассе\"",
+]
 
 # =============================================================================
 # 4. ОПТИМИЗИРОВАННЫЕ ФУНКЦИИ ДАННЫХ
@@ -1111,6 +1123,63 @@ table tbody tr:hover {{ background-color: #f1f7fc !important; cursor: pointer; }
     width: 165px !important;
 }}
 
+/* ===== ПЕРЕКЛЮЧАТЕЛЬ "ДА/НЕТ" СО СТРЕЛОЧКАМИ (npTable) ===== */
+#npTable td.np-toggle-cell {{
+    padding: 4px 6px !important;
+    text-align: center !important;
+}}
+.toggle-widget {{
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+}}
+.toggle-value {{
+    min-width: 30px;
+    display: inline-block;
+    font-weight: 600;
+    font-family: var(--font-ui);
+}}
+.toggle-arrow {{
+    -webkit-user-select: none;
+    -moz-user-select: none;
+    -ms-user-select: none;
+    user-select: none;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 20px;
+    height: 20px;
+    padding: 0;
+    border: 1px solid #cbd5e1;
+    border-radius: 4px;
+    background-color: #ffffff;
+    font-size: 11px;
+    line-height: 1;
+    transition: background-color 0.15s, border-color 0.15s;
+}}
+.toggle-arrow-up {{
+    color: #27ae60;
+}}
+.toggle-arrow-down {{
+    color: #e74c3c;
+}}
+.toggle-arrow-up:hover {{
+    background-color: #e8f8f5;
+    border-color: #27ae60;
+}}
+.toggle-arrow-down:hover {{
+    background-color: #fdedec;
+    border-color: #e74c3c;
+}}
+#npTable td.np-toggle-cell[data-state="yes"] .toggle-value {{
+    color: #27ae60;
+}}
+#npTable td.np-toggle-cell[data-state="no"] .toggle-value {{
+    color: #e74c3c;
+}}
+
 /* Стиль div для кнопок страницы 4*/
 .centered-portal-btn{{
     display: flex; 
@@ -1248,6 +1317,85 @@ function lockSelectInput() {
     });
 }
 
+// Колонки, которые на странице района отображаются как переключатель "да/нет"
+const TOGGLE_YES_NO_COLUMNS = [
+    'Количество точек финансового доступа',
+    'Количество Финансовых помощников',
+    'Количество торговых точек с сервисом "Выдача наличных на кассе"'
+];
+
+// Находит индекс колонки в таблице по атрибуту data-colname у <th>
+function getColumnIndexByName(table, colName) {
+    if (!table || !table.tHead || !table.tHead.rows[0]) return -1;
+    const headers = Array.from(table.tHead.rows[0].cells);
+    return headers.findIndex(h => h.dataset && h.dataset.colname === colName);
+}
+
+// Пересчитывает суммарное количество "да" по каждому переключателю
+// в npTable и обновляет соответствующие ячейки строки района в districtTable
+function recalcDistrictToggleTotals() {
+    const npTable = parentDoc.getElementById("npTable");
+    const districtTable = parentDoc.getElementById("districtTable");
+    if (!npTable || !districtTable) return;
+    if (!npTable.tBodies[0] || !districtTable.tBodies[0]) return;
+
+    const distRows = districtTable.tBodies[0].rows;
+    if (distRows.length === 0) return;
+    // Строка района — всегда последняя строка в теле districtTable
+    // (перед ней может идти строка "Новосибирская область")
+    const districtRow = distRows[distRows.length - 1];
+
+    TOGGLE_YES_NO_COLUMNS.forEach(colName => {
+        const npColIndex = getColumnIndexByName(npTable, colName);
+        const distColIndex = getColumnIndexByName(districtTable, colName);
+        if (npColIndex === -1 || distColIndex === -1) return;
+
+        let count = 0;
+        Array.from(npTable.tBodies[0].rows).forEach(row => {
+            const cell = row.cells[npColIndex];
+            if (cell && cell.classList.contains("np-toggle-cell") && cell.dataset.state === "yes") {
+                count += 1;
+            }
+        });
+
+        const distCell = districtRow.cells[distColIndex];
+        if (distCell) {
+            distCell.textContent = String(count);
+        }
+    });
+}
+
+// Инициализирует переключатель "да/нет" в npTable через делегирование событий.
+// Обработчик клика вешается ОДИН РАЗ на parentDoc (а не на каждую кнопку),
+// поэтому переключатель продолжает работать даже после того, как Streamlit
+// перерисовывает HTML-блок с таблицей (например, при любом ререндере страницы),
+// из-за чего обработчики, навешенные напрямую на кнопки, слетают вместе со
+// старыми DOM-узлами.
+function initNpToggles() {
+    if (parentDoc.__npToggleDelegated === true) return;
+    parentDoc.__npToggleDelegated = true;
+
+    parentDoc.addEventListener("click", function (e) {
+        const upBtn = e.target.closest("#npTable td.np-toggle-cell .toggle-arrow-up");
+        const downBtn = e.target.closest("#npTable td.np-toggle-cell .toggle-arrow-down");
+        if (!upBtn && !downBtn) return;
+
+        e.preventDefault();
+        e.stopPropagation();
+
+        const cell = (upBtn || downBtn).closest("td.np-toggle-cell");
+        if (!cell) return;
+        const valueSpan = cell.querySelector(".toggle-value");
+        const newState = upBtn ? "yes" : "no";
+
+        if (cell.dataset.state !== newState) {
+            cell.dataset.state = newState;
+            if (valueSpan) valueSpan.textContent = newState === "yes" ? "да" : "нет";
+            recalcDistrictToggleTotals();
+        }
+    });
+}
+
 function makeSortable(tableId) {
     const table = parentDoc.getElementById(tableId);
     if (!table || !table.tBodies || !table.tBodies[0]) return;
@@ -1298,6 +1446,8 @@ setInterval(() => {
     makeSortable("npTable");
     makeSortable("districtTable");
     lockSelectInput();
+    initNpToggles();
+    recalcDistrictToggleTotals();
 }, 500);
 
 </script>
@@ -1418,7 +1568,6 @@ if st.session_state.page == 'home':
             <h1>Информационная панель<br>доступности финансовых услуг в сельской местности<br>на территории Новосибирской области </h1>
         </div>
         <div class="sub-title">
-            <h4>Новосибирская область</h4>
             <p>30 муниципальных образований, 876 населенных пунктов (без учета городов и с численностью населения от 100 человек)</p>
         </div>
     </div>
@@ -1572,20 +1721,11 @@ if st.session_state.page == 'home':
 # СЦЕНАРИЙ №2: УРОВЕНЬ ФИНАНСОВОЙ ДОСТУПНОСТИ
 # =============================================================================
 elif st.session_state.page == 'page2':
-    from_page = query_params.get("from_page", "home")
-    if isinstance(from_page, list):
-        from_page = from_page[0]
-
-    if from_page in ('page2', 'page3'):
-        back_href = f"?page={from_page}&date={current_date}"
-    else:
-        back_href = f"?date={current_date}"
-
-    st.markdown(f'''
-    <div class="back-btn-container">
-        <a href="{back_href}" class="back-link">⬅️ Возврат на предыдущую страницу</a>
-    </div>
-    ''', unsafe_allow_html=True)
+    st.markdown('<div class="back-btn-container">', unsafe_allow_html=True)
+    if st.button("⬅️ Возврат на главную страницу"):
+        go_home()
+        st.rerun()
+    st.markdown('</div>', unsafe_allow_html=True)
 
     # Индикаторные карточки
     st.markdown(build_page2_indicators_html(df_indicators), unsafe_allow_html=True)
@@ -1794,7 +1934,9 @@ elif st.session_state.page == 'district':
 
             district_row_data = region_row[cols_to_show].copy()
             dist_headers = list(cols_to_show)
-            dist_header_html = "".join(f"<th>{c}</th>" for c in dist_headers)
+            dist_header_html = "".join(
+                f'<th data-colname="{html.escape(str(c))}">{c}</th>' for c in dist_headers
+            )
 
             # --- ФОРМИРОВАНИЕ СТРОКИ НСО ---
             nso_row_html = ""
@@ -1879,13 +2021,33 @@ elif st.session_state.page == 'district':
             st.markdown('<div class="sort-caption">(работает сортировка по нажатию на заголовки)</div>', unsafe_allow_html=True)
 
             if not df_np_region.empty:
-                np_headers_html = "".join(f"<th>{c}</th>" for c in available_cols)
+                np_headers_html = "".join(
+                    f'<th data-colname="{html.escape(str(c))}">{c}</th>' for c in available_cols
+                )
                 np_rows_html = ""
                 for _, row in df_np_region.iterrows():
                     cells = ""
                     for col in available_cols:
                         val = row[col]
-                        if pd.notna(val) and str(col).startswith(("Уровень", "Изменение уровня")):
+                        if col in TOGGLE_YES_NO_COLUMNS:
+                            # Переключатель "да/нет" со стрелочками вверх-вниз:
+                            # 0 (или отсутствие значения) -> "нет", любое положительное число -> "да"
+                            try:
+                                num_val = float(str(val).replace(',', '.').strip())
+                            except (ValueError, TypeError):
+                                num_val = 0
+                            state = "yes" if num_val > 0 else "no"
+                            state_label = "да" if state == "yes" else "нет"
+                            cells += (
+                                f'<td class="np-toggle-cell" data-state="{state}">'
+                                f'<span class="toggle-widget">'
+                                f'<button type="button" class="toggle-arrow toggle-arrow-up" title="Да">&#9650;</button>'
+                                f'<span class="toggle-value">{state_label}</span>'
+                                f'<button type="button" class="toggle-arrow toggle-arrow-down" title="Нет">&#9660;</button>'
+                                f'</span>'
+                                f'</td>'
+                            )
+                        elif pd.notna(val) and str(col).startswith(("Уровень", "Изменение уровня")):
                             try:
                                 num_val = float(str(val).replace('%', '').replace(',', '.').strip())
                                 if num_val <= 1.0:
