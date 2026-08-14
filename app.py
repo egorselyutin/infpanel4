@@ -494,6 +494,18 @@ div[data-testid="stMarkdownContainer"] {{
     filter: drop-shadow(0 2px 4px rgba(0,0,0,0.1));
 }}
 
+/* Полное скрытие элементов управления заголовками Streamlit */
+[data-testid="stHeaderActionElements"],
+h1 a.anchor-link, h2 a.anchor-link, h3 a.anchor-link {{
+    display: none !important;
+}}
+
+/* Убираем отступы и выравниваем заголовки строго по центру */
+.main-title h1 {{
+    display: block !important; /* Убираем flex, который сдвигался из-за скрытой иконки */
+    text-align: center !important;
+}}
+
 .sub-title {{
     text-align: center !important;
 }}
@@ -1573,7 +1585,7 @@ if st.session_state.page == 'home':
     </div>
     """, unsafe_allow_html=True)
 
-    _, center_col, _ = st.columns([5.8, 1, 6])
+    _, center_col, _ = st.columns([6, 1.2, 6])
     with center_col:
         st.markdown('<div class="date-picker-wrapper">', unsafe_allow_html=True)
 #        dates_list = ["01.01.2025", "01.07.2025", "01.01.2026"]
