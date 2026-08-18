@@ -563,7 +563,7 @@ h1 a.anchor-link, h2 a.anchor-link, h3 a.anchor-link {{
     display: flex;
     justify-content: center;
     gap: 60px;
-    margin: 25px auto 30px auto;
+    margin: 25px auto 25px auto;
     max-width: 1100px;
 }}
 .nav-card {{
@@ -618,7 +618,7 @@ h1 a.anchor-link, h2 a.anchor-link, h3 a.anchor-link {{
     display: flex;
     justify-content: center;
     gap: 420px;
-    margin: 0 auto 20px auto;
+    margin: 12px auto 0px auto;
     max-width: 1100px;
 }}
 
@@ -961,7 +961,7 @@ box-shadow: 0 14px 12px rgba(0, 0, 0, 0.18)
     position: absolute;
     top: -34px;
     right: 16px;
-    width: 300px; /* Фиксированная ширина блока */
+    width: 350px; /* Фиксированная ширина блока */
     padding: 8px 12px;
     background-color: #ffffff;
     color: #1e293b;
@@ -1010,12 +1010,18 @@ box-shadow: 0 14px 12px rgba(0, 0, 0, 0.18)
 /* ===== ТЕКСТОВЫЕ БЛОКИ ГЛАВНОЙ ===== */
 .home-info-text {{
     font-family: var(--font-text);
-    font-size: 15px;
+    font-size: 18px;
     color: #333;
-    line-height: 1.5;
-    text-align: center;
-    max-width: 900px;
-    margin: 0 auto 15px auto;
+    line-height: 1.8;
+    max-width: 1100px;
+    margin: 15px auto;
+}}
+
+/* Применяем отступ и выравнивание ко всем абзацам внутри блока */
+.home-info-text p {{
+    text-indent: 1.25cm;
+    text-align: justify;
+    margin: 0 0 0 0; /* отступ снизу между абзацами */
 }}
 
 /* ===== ЛЕГЕНДА ТЕПЛОВОЙ КАРТЫ ===== */
@@ -1100,6 +1106,7 @@ table tbody tr:hover {{ background-color: #f1f7fc !important; cursor: pointer; }
 
 
 
+
 /* ===== РАЗДЕЛИТЕЛИ ===== */
 .custom-separator {{
     height: 1px;
@@ -1109,10 +1116,16 @@ table tbody tr:hover {{ background-color: #f1f7fc !important; cursor: pointer; }
 }}
 .custom-separator800 {{ max-width: 800px; }}
 
+.custom-separator1000 {{ max-width: 1000px; }}
+
 /* ===== СТРАНИЦА РАЙОНА ===== */
 .district-section-title {{
-    font-family: var(--font-ui); font-size: 17px; font-weight: 600;
-    color: #1a252c; margin-top: 1px; margin-bottom: 12px;
+    font-family: var(--font-ui); 
+    font-size: 17px; 
+    font-weight: 600;
+    color: #1a252c; 
+    margin-top: 20px; 
+    margin-bottom: 12px;
     text-align: center;
 }}
 .sort-caption {{
@@ -1203,6 +1216,23 @@ table tbody tr:hover {{ background-color: #f1f7fc !important; cursor: pointer; }
 /* ширина кнопок внизу страницы 4 (НП)*/
 .w400{{
     width: 400px !important;
+}}
+
+.weights-correct {{
+    margin-top: 0 !important;
+}}
+#weights_np tr th, #npTable tr th {{
+    position: static !important;
+}}
+
+/* Повышаем приоритет цвета для стрелок СТРАНИЦЫ 4 селектором таблицы */
+table tbody tr td.change-pos-custom {{ 
+    color: #27ae60 !important; 
+    font-weight: bold !important; 
+}}
+table tbody tr td.change-neg-custom {{
+    color: #e74c3c !important; 
+    font-weight: bold !important; 
 }}
 
 
@@ -1456,7 +1486,6 @@ function makeSortable(tableId) {
 setInterval(() => {
     makeSortable("mainTable");
     makeSortable("npTable");
-    makeSortable("districtTable");
     lockSelectInput();
     initNpToggles();
     recalcDistrictToggleTotals();
@@ -1486,11 +1515,11 @@ def build_page2_indicators_html(df_ind):
         return '<div style="padding:10px;text-align:center;color:#999;">Данные показателей не найдены</div>'
     
     tooltips_p2 = {
-        0: "С учетом населенных пунктов с численностью населения от 100 человек и без учета городов",
-        2: "Головной офис, филиал, внутреннее структурное подразделение банка; мобильный банковский офис; удаленная точка с банковским работником",
-        3: "Стационарное отделение почтовой связи, передвижные отделения почтовой связи",
-        4: "Автоматические устройства для осуществления расчетов, обеспечивающие возможность выдачи и (или) приема наличных денежных средств, в том числе с использованием электронных средств платежа, и по передаче распоряжения банку об осуществлении перевода денежных средств",
-        5: "Наличие возможности в торговой точке при оплате товара банковской картой дополнительно воспользоваться услугой по снятию наличных с банковской карты (Доступно для ЮЛ и ИП с системой налогообложения ОСН и патент)"
+        0: "С учетом населенных пунктов с численностью населения от 100 человек и без учета городов.",
+        2: "Головной офис, филиал, внутреннее структурное подразделение банка; мобильный банковский офис; удаленная точка с банковским работником.",
+        3: "Стационарное отделение почтовой связи, передвижные отделения почтовой связи.",
+        4: "Устройство самообслуживания банка для выдачи и приема денежных средств, оплаты услуг и совершения переводов без участия банковского сотрудника, с использованием и без использования банковских карт.",
+        5: "Наличие возможности в торговой точке при оплате товара банковской картой дополнительно воспользоваться услугой по снятию наличных с банковской карты (доступно для ЮЛ и ИП с системой налогообложения ОСНО, УСН, ПСН)."
     }
     
     html = '<div class="indicators-row">'
@@ -1528,9 +1557,9 @@ def build_page3_indicators_html(df_ind):
         return '<div style="padding:10px;text-align:center;color:#999;">Данные показателей не найдены</div>'
     
     tooltips_p3 = {
-        1: "С учетом населенных пунктов с численностью населения от 100 человек и без учета городов",
-        6: "Определение точки финансового доступа",
-        7: "Определение финансового помощника"
+        1: "С учетом населенных пунктов с численностью населения от 100 человек и без учета городов.",
+        6: "Рабочее место в общедоступном помещении с выходом в сеть Интернет, где жители сельской местности могут безопасно получить финансовые и государственные услуги, а также доступ к маркетплейсам, образовательным сервисам и сайтам по финансовой грамотности.",
+        7: "Житель населенного пункта, который консультирует местных жителей по вопросам получения финансовых услуг и способствует организации альтернативных форматов банковского обслуживания."
     }
     
     html = '<div class="indicators-row">'
@@ -1617,21 +1646,19 @@ if st.session_state.page == 'home':
     </div>
     """, unsafe_allow_html=True)
 
-    st.markdown('<div class="custom-separator custom-separator800"></div>', unsafe_allow_html=True)
+#    st.markdown('<div class="custom-separator custom-separator1000"></div>', unsafe_allow_html=True)
 
     st.markdown("""
     <div class="home-info-text">
-        Информационная панель доступности финансовых услуг в сельской местности на территории Новосибирской области — …
-        <br><br><br><br><br><br><br><br>
+        <p><b>Информационная панель доступности финансовых услуг в сельской местности</b> – это интерактивный инструмент, демонстрирующий уровень доступности финансовых услуг и уровень потребности в развитии дистанционного банковского обслуживания на отдаленных, малонаселенных и труднодоступных территориях Новосибирской области.</p>
+        <p>Данный инструмент предоставляет возможность региональным органам исполнительной власти и местного самоуправления:</p>
+        <p>- получить информацию об инфраструктуре предоставления финансовых услуг для жителей сельской местности;</p>
+        <p>- определять муниципальные образования / населенные пункты, требующие внимания;</p>
+        <p>- планировать мероприятия, направленные на повышение доступности финансовых услуг (при поддержке Сибирского ГУ Банка России в части методологии);</p>
+        <p>- формировать прогнозные значения показателей финансовой доступности за счет увеличения количества точек финансового доступа, финансовых помощников, торговых точек с сервисом выдачи наличных на кассе.</p>
     </div>
     """, unsafe_allow_html=True)
 
-    st.markdown("""
-    <div class="home-info-text">
-        Для кого создается и чем будет полезна…
-        <br><br><br><br><br><br><br><br>
-    </div>
-    """, unsafe_allow_html=True)
 
     st.markdown("<div style='margin-top: 40px;'></div>", unsafe_allow_html=True)
 
@@ -1916,8 +1943,7 @@ elif st.session_state.page == 'district':
         if not region_row.empty:
             region_name = region_row['Район'].values[0]
 
-            st.markdown(f'<h2 style="font-family: var(--font-ui); text-align: center; font-size: 28px !important; font-weight: 700; color: #1a252c; margin-top: 20px; margin-bottom: 5px; letter-spacing: -0.01em;">{region_name}</h2>', unsafe_allow_html=True)
-
+            # --- Сначала считаем данные по населенным пунктам района (нужны для счетчика "Количество населенных пунктов") ---
             cols_to_show = [col for col in region_row.columns if col != 'ID']
             np_display_cols = []
             for col in cols_to_show:
@@ -1938,9 +1964,67 @@ elif st.session_state.page == 'district':
 
             b64_np_excel = convert_df_to_excel_b64(df_np_region, sheet_name='Населенные пункты') if not df_np_region.empty else ""
 
-            st.markdown(f'<div class="district-section-title">Количество населенных пунктов: {len(df_np_region)}</div>', unsafe_allow_html=True)
-            st.markdown('<div style="font-family: var(--font-ui); font-size: 16px; font-weight: 600; color: #1a252c; margin-top: 10px; margin-bottom: 8px; text-align: center;">(без городов и с численностью населения от 100 чел.)</div>', unsafe_allow_html=True)
-            st.markdown(f'<h5 style="font-family: var(--font-ui); text-align: center; font-size: 16px !important; font-weight: 600; color: #1a252c; margin-top: 10px; margin-bottom: 10px; letter-spacing: 0.05em;">на {current_date}</h5>', unsafe_allow_html=True)
+            # -----------------------------------------------------------------
+            # Макет строки под кнопкой "Возврат на предыдущую страницу":
+            # три колонки [3, 3, 3]:
+            #   1) кнопка "Сброс прогнозных значений"
+            #   2) заголовок района / счетчик НП / подпись / дата
+            #   3) заголовок "Величина поправочного коэффициента..." и таблица weights_np
+            # -----------------------------------------------------------------
+            col_reset, col_header, col_weights = st.columns([3, 3, 3])
+
+            with col_reset:
+                # 1. Стили для кнопки: принудительная ширина 322px и отступ
+                st.markdown('''
+                    <style>
+                        /* Находим кнопку по ее уникальному ключу внутри контейнера */
+                        div[data-testid="stButton"] > button {
+                            width: 322px !important;
+                            max-width: 322px !important;
+                        }
+                    </style>
+                ''', unsafe_allow_html=True)
+
+                # 2. Простое и надежное смещение кнопки вниз с помощью отступа
+                st.markdown('<div style="margin-top: 280px;"></div>', unsafe_allow_html=True)
+
+                if st.button("🔄 Сброс прогнозных значений", key="reset_forecast_btn", use_container_width=False):
+                    st.rerun()
+
+            with col_header:
+                st.markdown(f'<h2 style="font-family: var(--font-ui); text-align: center; font-size: 28px !important; font-weight: 700; color: #1a252c; margin-top: -20px; margin-bottom: 5px; letter-spacing: -0.01em;">{region_name}</h2>', unsafe_allow_html=True)
+                st.markdown(f'<div class="district-section-title">Количество населенных пунктов: {len(df_np_region)}</div>', unsafe_allow_html=True)
+                st.markdown('<div style="font-family: var(--font-ui); font-size: 16px; font-weight: 600; color: #1a252c; margin-top: 10px; margin-bottom: 8px; text-align: center;">(без городов и с численностью населения от 100 чел.)</div>', unsafe_allow_html=True)
+                st.markdown(f'<h5 style="font-family: var(--font-ui); text-align: center; font-size: 16px !important; font-weight: 600; color: #1a252c; margin-top: 10px; margin-bottom: 10px; letter-spacing: 0.05em;">на {current_date}</h5>', unsafe_allow_html=True)
+
+            with col_weights:
+                # --- ТАБЛИЦА «УДЕЛЬНЫЕ ВЕСА» (перенесена сюда, в правую колонку) ---
+                st.markdown("""
+                <div style="display: flex; flex-direction: column; align-items: center; padding-left: 70px;">
+                    <div style="font-family: var(--font-ui); font-size: 16px; font-weight: 600; line-height: 1.5; text-align: center; margin-bottom: 10px; color: #1a252c;">
+                        Величина поправочного коэффициента к уровню потребности <br>в развитии дистанционного банковского обслуживания в зависимости <br>от уровня финансовой доступности населенного пункта
+                    </div>
+                    <div style="max-width: 900px; width: 100%;">
+                        <table id="weights_np" class="weights-table weights-correct" style="width: 100% !important;">
+                            <thead>
+                                <tr>
+                                    <th style="width: 132px;">Уровень финансовой доступности</th>
+                                    <th style="width: 100px;">Значение, %</th>
+                                    <th style="width: 132px;">Наличие Точки финансового доступа</th>
+                                    <th style="width: 132px;">Присутствие Финансового помощника, %</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                <tr><td>Хороший</td><td>86 – 100</td><td>0</td><td>2</td></tr>
+                                <tr><td>Выше среднего</td><td>66 – 85</td><td>1</td><td>3</td></tr>
+                                <tr><td>Средний</td><td>46 – 65</td><td>2</td><td>4</td></tr>
+                                <tr><td>Ниже среднего</td><td>31 – 45</td><td>3</td><td>5</td></tr>
+                                <tr><td>Недостаточный</td><td>0 – 30</td><td>4</td><td>6</td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+                """, unsafe_allow_html=True)
 
             st.markdown('<div class="custom-separator"></div>', unsafe_allow_html=True)
 
@@ -1960,7 +2044,7 @@ elif st.session_state.page == 'district':
                         nso_cells += f'<td style="font-weight: 700 !important;">Новосибирская область</td>'
                         continue
                     val = nso_row.get(col, "")
-                    if str(col).startswith(("Уровень", "Изменение уровня")) and pd.notna(val):
+                    if str(col).startswith(("Уровень")) and pd.notna(val):
                         try:
                             num_val = float(str(val).replace('%', '').replace(',', '.').strip())
                             if num_val <= 1.0:
@@ -1969,6 +2053,32 @@ elif st.session_state.page == 'district':
                             nso_cells += f'<td class="{css_class}">{num_val:.1f}%</td>'
                         except Exception:
                             nso_cells += f'<td>{val}</td>'
+
+                    # ДОБАВЛЕННЫЙ БЛОК:
+                    elif str(col).startswith(("Изменение уровня")) and pd.notna(val):
+                        try:
+                            num_val = float(str(val).replace(',', '.').strip())
+
+                            # Определяем цвет, стрелку и форматирование
+                            if num_val > 0:
+                                css_class = "change-pos-custom"
+                                arrow = "&#11014;"
+                                formatted_val = f"+{num_val:.1f}"
+                            elif num_val < 0:
+                                css_class = "change-neg-custom"
+                                arrow = "&#11015;"
+                                formatted_val = f"{num_val:.1f}"
+                            else:
+                                css_class = ""
+                                arrow = ""
+                                formatted_val = "0.0"
+
+                            # Теперь используем класс, который перекроет глобальный цвет
+                            nso_cells += f'<td class="{css_class}">{arrow} {formatted_val}</td>'
+
+                        except (ValueError, TypeError):
+                            nso_cells += f'<td>{val}</td>'
+
                     else:
                         nso_cells += f'<td>{val if pd.notna(val) else ""}</td>'
                 nso_row_html = f'<tr style="background-color: #e8f4f8">{nso_cells}</tr>'
@@ -1977,7 +2087,7 @@ elif st.session_state.page == 'district':
             dist_cells = ""
             for col in cols_to_show:
                 val = district_row_data[col].values[0]
-                if str(col).startswith(("Уровень", "Изменение уровня")) and pd.notna(val):
+                if str(col).startswith(("Уровень")) and pd.notna(val):
                     try:
                         num_val = float(str(val).replace('%', '').replace(',', '.').strip())
                         if num_val <= 1.0:
@@ -1986,6 +2096,32 @@ elif st.session_state.page == 'district':
                         dist_cells += f'<td class="{css_class}">{num_val:.1f}%</td>'
                     except Exception:
                         dist_cells += f'<td>{val}</td>'
+
+                # ДОБАВЛЕННЫЙ БЛОК:
+                elif str(col).startswith(("Изменение уровня")) and pd.notna(val):
+                    try:
+                        num_val = float(str(val).replace(',', '.').strip())
+
+                        # Определяем цвет, стрелку и форматирование
+                        if num_val > 0:
+                            css_class = "change-pos-custom"
+                            arrow = "&#11014;"
+                            formatted_val = f"+{num_val:.1f}"
+                        elif num_val < 0:
+                            css_class = "change-neg-custom"
+                            arrow = "&#11015;"
+                            formatted_val = f"{num_val:.1f}"
+                        else:
+                            css_class = ""
+                            arrow = ""
+                            formatted_val = "0.0"
+
+                        # Теперь используем класс, который перекроет глобальный цвет
+                        dist_cells += f'<td class="{css_class}">{arrow} {formatted_val}</td>'
+
+                    except (ValueError, TypeError):
+                        dist_cells += f'<td>{val}</td>'
+
                 else:
                     dist_cells += f'<td>{val if pd.notna(val) else ""}</td>'
 
@@ -2000,35 +2136,7 @@ elif st.session_state.page == 'district':
             """
             st.markdown(district_table_html, unsafe_allow_html=True)
 
-            # --- ТАБЛИЦА «УДЕЛЬНЫЕ ВЕСА» ---
-            st.markdown("""
-            <div style="display: flex; flex-direction: column; align-items: center; margin-top: 40px; margin-bottom: 40px;">
-                <div style="font-family: var(--font-ui); font-size: 18px; font-weight: 600; margin-bottom: 15px; color: #1a252c;">
-                    Величина поправочного коэффициента к уровню потребности в развитии дистанционного банковского обслуживания в зависимости от уровня финансовой доступности населенного пункта
-                </div>
-                <div style="max-width: 900px; width: 100%;">
-                    <table id="weights_np" class="weights-table" style="width: 100% !important;">
-                        <thead>
-                            <tr>
-                                <th>Уровень финансовой доступности</th>
-                                <th>Значение, %</th>
-                                <th>Наличие Точки финансового доступа</th>
-                                <th>Присутствие Финансового помощника, %</th>
-                            </tr>
-                        </thead>
-                        <tbody>
-                            <tr><td>Хороший</td><td>86 – 100</td><td>0</td><td>2</td></tr>
-                            <tr><td>Выше среднего</td><td>66 – 85</td><td>1</td><td>3</td></tr>
-                            <tr><td>Средний</td><td>46 – 65</td><td>2</td><td>4</td></tr>
-                            <tr><td>Ниже среднего</td><td>31 – 45</td><td>3</td><td>5</td></tr>
-                            <tr><td>Недостаточный</td><td>0 – 30</td><td>4</td><td>6</td></tr>
-                        </tbody>
-                    </table>
-                </div>
-            </div>
-            """, unsafe_allow_html=True)
 
-            st.markdown("<div style='margin-top: 20px;'></div>", unsafe_allow_html=True)
             st.markdown('<div class="district-section-title">Населенные пункты</div>', unsafe_allow_html=True)
             st.markdown('<div class="sort-caption">(работает сортировка по нажатию на заголовки)</div>', unsafe_allow_html=True)
 
@@ -2059,7 +2167,7 @@ elif st.session_state.page == 'district':
                                 f'</span>'
                                 f'</td>'
                             )
-                        elif pd.notna(val) and str(col).startswith(("Уровень", "Изменение уровня")):
+                        elif pd.notna(val) and str(col).startswith(("Уровень")):
                             try:
                                 num_val = float(str(val).replace('%', '').replace(',', '.').strip())
                                 if num_val <= 1.0:
@@ -2068,6 +2176,32 @@ elif st.session_state.page == 'district':
                                 cells += f'<td class="{css_class}">{num_val:.1f}%</td>'
                             except (ValueError, TypeError):
                                 cells += f'<td>{val}</td>'
+
+                        # ДОБАВЛЕННЫЙ БЛОК:
+                        elif pd.notna(val) and str(col).startswith(("Изменение уровня")):
+                            try:
+                                num_val = float(str(val).replace(',', '.').strip())
+
+                                # Определяем цвет, стрелку и форматирование
+                                if num_val > 0:
+                                    css_class = "change-pos-custom"
+                                    arrow = "&#11014;"
+                                    formatted_val = f"+{num_val:.1f}"
+                                elif num_val < 0:
+                                    css_class = "change-neg-custom"
+                                    arrow = "&#11015;"
+                                    formatted_val = f"{num_val:.1f}"
+                                else:
+                                    css_class = ""
+                                    arrow = ""
+                                    formatted_val = "0.0"
+
+                                # Теперь используем класс, который перекроет глобальный цвет
+                                cells += f'<td class="{css_class}">{arrow} {formatted_val}</td>'
+
+                            except (ValueError, TypeError):
+                                cells += f'<td>{val}</td>'
+
                         else:
                             cells += f'<td>{val if pd.notna(val) else ""}</td>'
                     np_rows_html += f'<tr>{cells}</tr>\n'
