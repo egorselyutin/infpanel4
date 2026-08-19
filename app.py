@@ -1148,6 +1148,30 @@ table tbody tr:hover {{ background-color: #f1f7fc !important; cursor: pointer; }
     width: 165px !important;
 }}
 
+/* ===== ФИКСАЦИЯ ТАБЛИЦЫ districtTable ПРИ СКРОЛЛЕ (страница 4) ===== */
+/* Общее правило "table thead tr th {{ position: sticky; ... }}" выше по файлу
+   прилипает только к строке заголовка и конфликтует с идеей "прилипает вся
+   таблица целиком" (заголовок и обе строки данных остаются видны одновременно,
+   а не наслаиваются друг на друга). Поэтому для districtTable отключаем
+   стандартный sticky у заголовка. */
+#districtTable thead tr th {{
+    position: static !important;
+    top: auto !important;
+}}
+/* ПОПЫТКА №2 (через position: sticky на едином враппере вокруг таблицы)
+   тоже не сработала: где-то в цепочке предков этого враппера Streamlit
+   обрезает/ограничивает sticky-контекст (типично для верстки на flex-блоках
+   с overflow, которые генерирует сам Streamlit под капотом, и предсказать
+   заранее без инспекции в браузере, какой именно предок виноват, нельзя).
+   Поэтому вместо CSS sticky вся фиксация теперь полностью реализована на
+   JS через position: fixed — см. функцию syncDistrictTableSticky в блоке
+   "8. JS СКРИПТ ДЛЯ СОРТИРОВКИ ТАБЛИЦ" ниже. Она не зависит от того, какой
+   именно элемент физически скроллится, и работает даже под предками с
+   overflow: hidden/scroll и css transform. */
+#districtTablePlaceholder {{
+    width: 100%;
+}}
+
 /* ===== ПЕРЕКЛЮЧАТЕЛЬ "ДА/НЕТ" СО СТРЕЛОЧКАМИ (npTable) ===== */
 #npTable td.np-toggle-cell {{
     padding: 4px 6px !important;
@@ -1438,6 +1462,181 @@ function initNpToggles() {
     });
 }
 
+// =====================================================================
+// ФИКСАЦИЯ ТАБЛИЦЫ districtTable ПРИ СКРОЛЛЕ (страница 4, "СЦЕНАРИЙ №4")
+// =====================================================================
+// История двух неудачных попыток и в чем была причина:
+//   1) position: sticky на th/tr/td по отдельности — несколько sticky-
+//      элементов с одинаковым top "прилипают" к одной линии независимо
+//      друг от друга, и строки таблицы просто накладываются друг на друга.
+//   2) position: sticky на ОДНОМ элементе-обертке вокруг всей таблицы —
+//      технически правильный CSS-подход, но не сработал, т.к. где-то по
+//      цепочке предков этого враппера Streamlit создает элемент, который
+//      обрезает/ограничивает sticky-контекст (это особенность внутренней
+//      верстки Streamlit на flex-контейнерах, и без инспекции в браузере
+//      заранее не угадать, какой именно предок виноват).
+//
+// Поэтому фиксация теперь полностью реализована на JS через position: fixed,
+// но с важным отличием от самой первой JS-попытки: тогда обработчик scroll
+// был навешен на window.parent, а событие scroll НЕ ВСПЛЫВАЕТ (не bubbles) —
+// если реальная прокрутка происходит на каком-то внутреннем div, событие
+// scroll этого div никогда не долетит до window. Решение — навесить
+// обработчик scroll в РЕЖИМЕ ПЕРЕХВАТА (capture phase, третий аргумент
+// addEventListener = true): в отличие от всплытия, фаза перехвата всегда
+// проходит "сверху вниз" от document ко всем вложенным элементам, поэтому
+// такой обработчик сработает при скролле ЛЮБОГО элемента на странице,
+// включая произвольный вложенный div, независимо от того, что именно
+// физически прокручивается внутри разметки Streamlit.
+//
+// Второй важный момент: чтобы понять, когда таблицу нужно зафиксировать
+// и когда вернуть обратно, используется getBoundingClientRect() — этот
+// метод всегда возвращает координаты элемента ОТНОСИТЕЛЬНО ВИДИМОЙ ОБЛАСТИ
+// (viewport), независимо от того, какой контейнер скроллится. Поэтому нет
+// нужды заранее знать, что именно является "скролл-контейнером" — можно
+// просто проверять текущее положение таблицы (когда она в обычном потоке)
+// и положение плейсхолдера (когда она уже зафиксирована).
+
+const STICKY_SCROLL_THRESHOLD = -20; // «до верха страницы осталось 20 пикселей»
+
+let districtTableRef = null;          // ссылка на текущий DOM-узел таблицы
+let districtTableFixed = false;       // зафиксирована ли таблица сейчас
+let districtTablePlaceholder = null;  // "заглушка" на месте таблицы, пока она fixed
+
+function resetDistrictTableInlineStyles(table) {
+    table.style.removeProperty("position");
+    table.style.removeProperty("top");
+    table.style.removeProperty("left");
+    table.style.removeProperty("width");
+    table.style.removeProperty("z-index");
+    table.style.removeProperty("box-shadow");
+    table.style.removeProperty("background-color");
+}
+
+// Применяет фиксированное положение/размеры таблицы. Важно: глобальное
+// правило "table {{ width: 100% !important; }}" (см. блок "3. СТИЛИ ТАБЛИЦ")
+// перебивает обычный инлайн-стиль width, заданный через table.style.width —
+// !important в подключенной таблице стилей побеждает обычный инлайн-стиль.
+// Пока таблица в обычном потоке документа, "width: 100%" считается от ее
+// родителя — это то, что нужно. Но как только таблица становится
+// position: fixed, точкой отсчета для "100%" становится viewport, а не
+// исходный родитель, из-за чего таблица растягивается и "уезжает" вправо
+// (это и происходило на скриншоте: было бы 1760px, а по факту растягивалась
+// на всю ширину viewport, потому что !important-правило игнорировало
+// заданный нами инлайн width). Решение — задавать width (и left, на всякий
+// случай) с приоритетом "important" через setProperty, чтобы наш инлайн-
+// стиль тоже стал !important и гарантированно победил.
+function applyDistrictTableFixedBox(table, left, width) {
+    table.style.setProperty("position", "fixed", "important");
+    table.style.setProperty("top", "-16px", "important");
+    table.style.setProperty("left", left + "px", "important");
+    table.style.setProperty("width", width + "px", "important");
+    table.style.setProperty("z-index", "600", "important");
+    table.style.setProperty("box-shadow", "0 4px 12px rgba(0,0,0,0.18)", "important");
+    table.style.setProperty("background-color", "#ffffff", "important");
+}
+
+function syncDistrictTableSticky() {
+    const table = parentDoc.getElementById("districtTable");
+    if (!table) return; // на этой странице (не "СЦЕНАРИЙ №4") таблицы просто нет
+
+    // Streamlit мог пересоздать DOM-узел таблицы — начинаем отслеживание заново.
+    if (table !== districtTableRef) {
+        districtTableRef = table;
+        districtTableFixed = false;
+        districtTablePlaceholder = null;
+        resetDistrictTableInlineStyles(table);
+    }
+
+    // Плейсхолдер занимает место таблицы в потоке документа, пока сама
+    // таблица находится в position: fixed (иначе контент под ней "прыгнет" вверх).
+    if (!districtTablePlaceholder || !districtTablePlaceholder.isConnected) {
+        districtTablePlaceholder = parentDoc.createElement("div");
+        districtTablePlaceholder.id = "districtTablePlaceholder";
+        districtTablePlaceholder.style.display = "none";
+        table.parentNode.insertBefore(districtTablePlaceholder, table);
+    }
+
+    if (!districtTableFixed) {
+        // Таблица в обычном потоке — просто смотрим, насколько близко ее
+        // верхний край подошел к верхней границе видимой области (viewport).
+        const rect = table.getBoundingClientRect();
+        if (rect.top <= STICKY_SCROLL_THRESHOLD) {
+            // Запоминаем текущие размеры/положение ДО перехода в fixed,
+            // чтобы таблица не "прыгнула" по ширине, выйдя из потока документа.
+            districtTablePlaceholder.style.height = rect.height + "px";
+            districtTablePlaceholder.style.display = "block";
+            applyDistrictTableFixedBox(table, rect.left, rect.width);
+            districtTableFixed = true;
+        }
+    } else {
+        // Таблица зафиксирована — сверяемся с плейсхолдером: как только его
+        // "родное" место в потоке документа снова опустится ниже порога
+        // (то есть пользователь проскроллил обратно вверх), возвращаем
+        // таблицу в обычное положение.
+        const phRect = districtTablePlaceholder.getBoundingClientRect();
+        if (phRect.top > STICKY_SCROLL_THRESHOLD) {
+            resetDistrictTableInlineStyles(table);
+            districtTablePlaceholder.style.display = "none";
+            districtTableFixed = false;
+        } else {
+            // Остается зафиксированной — на случай ресайза окна подгоняем
+            // ширину/отступ слева под текущий размер плейсхолдера.
+            table.style.setProperty("left", phRect.left + "px", "important");
+            table.style.setProperty("width", phRect.width + "px", "important");
+        }
+    }
+}
+
+function initDistrictTableSticky() {
+    if (parentDoc.__districtStickyBound === true) return;
+    parentDoc.__districtStickyBound = true;
+
+    // capture: true — ключевой момент, см. пояснение в комментарии выше:
+    // так обработчик ловит scroll от любого вложенного элемента, а не
+    // только от window.
+    parentDoc.addEventListener("scroll", syncDistrictTableSticky, true);
+    window.parent.addEventListener("resize", syncDistrictTableSticky);
+}
+
+// =====================================================================
+// КНОПКА "СБРОС ПРОГНОЗНЫХ ЗНАЧЕНИЙ" (страница 4, "СЦЕНАРИЙ №4")
+// =====================================================================
+// Раньше клик обрабатывался инлайн-атрибутом onclick="..." прямо в HTML,
+// который передавался в st.markdown(..., unsafe_allow_html=True). Это
+// оказалось ненадежно: Streamlit рендерит markdown-контент через
+// react-markdown, и МНОГОСТРОЧНЫЙ атрибут onclick внутри "сырого" HTML-блока
+// парсер иногда искажает (нормализует переносы строк/кавычки), из-за чего
+// обработчик клика мог не навешиваться вообще.
+// Вместо этого используем тот же надежный механизм делегирования событий,
+// что уже применяется для стрелочек "да/нет" в npTable (см. initNpToggles
+// выше по файлу): кнопка — это просто <button id="resetForecastBtn"> без
+// каких-либо onclick-атрибутов, а слушатель клика навешивается один раз
+// на весь parentDoc и сам находит нужную кнопку через closest(...).
+function initResetForecastButton() {
+    if (parentDoc.__resetForecastBound === true) return;
+    parentDoc.__resetForecastBound = true;
+
+    parentDoc.addEventListener("click", function (e) {
+        const btn = e.target.closest("#resetForecastBtn");
+        if (!btn) return;
+
+        e.preventDefault();
+        e.stopPropagation();
+
+        // Плавно "гасим" экран оверлеем цвета фона, чтобы смягчить
+        // визуальный переход перед настоящей перезагрузкой страницы.
+        const overlay = parentDoc.getElementById("reset-forecast-overlay");
+        if (overlay) overlay.classList.add("active");
+
+        // window.parent — потому что этот скрипт выполняется внутри
+        // iframe-компонента (components.html), а перезагрузить нужно
+        // именно верхнюю (главную) страницу Streamlit-приложения.
+        setTimeout(function () {
+            window.parent.location.reload();
+        }, 150);
+    });
+}
+
 function makeSortable(tableId) {
     const table = parentDoc.getElementById(tableId);
     if (!table || !table.tBodies || !table.tBodies[0]) return;
@@ -1489,6 +1688,11 @@ setInterval(() => {
     lockSelectInput();
     initNpToggles();
     recalcDistrictToggleTotals();
+    initResetForecastButton();   // навешивает делегированный обработчик клика (один раз)
+    initDistrictTableSticky();   // навешивает scroll/resize-обработчики (один раз)
+    syncDistrictTableSticky();   // подстраховка: синхронизирует состояние по таймеру
+                                  // (например, если layout сдвинулся без события scroll —
+                                  // из-за подгрузки шрифтов, данных и т.п.)
 }, 500);
 
 </script>
@@ -1975,12 +2179,58 @@ elif st.session_state.page == 'district':
 
             with col_reset:
                 # 1. Стили для кнопки: принудительная ширина 322px и отступ
+                #    (внешний вид сохранен таким же, как был у st.button, но теперь
+                #    это обычная HTML-кнопка — см. пункт 3 ниже, почему)
                 st.markdown('''
                     <style>
-                        /* Находим кнопку по ее уникальному ключу внутри контейнера */
-                        div[data-testid="stButton"] > button {
+                        /* Кнопка "Сброс прогнозных значений": визуально повторяет
+                           стандартную кнопку Streamlit (белый фон, серая рамка,
+                           скругление), но является обычным HTML-элементом */
+                        .reset-forecast-btn {
+                            display: inline-flex;
+                            align-items: center;
+                            justify-content: center;
                             width: 322px !important;
+                            height: 90px !important;
                             max-width: 322px !important;
+                            padding: 0.5rem 0.75rem;
+                            font-family: var(--font-ui);
+                            font-size: 16px;
+                            font-weight: 550;
+                            line-height: 1.6;
+                            color: #31333F;
+                            background-color: #ffffff;
+                            border: 1px solid rgba(49, 51, 63, 0.2);
+                            border-radius: 8px;
+                            cursor: pointer;
+                            transition: border-color 0.15s ease, color 0.15s ease;
+                        }
+                        .reset-forecast-btn:hover {
+                            border-color: #ff4b4b;
+                            color: #ff4b4b;
+                        }
+                        .reset-forecast-btn:active {
+                            border-color: #ff4b4b;
+                            color: #ffffff;
+                            background-color: #ff4b4b;
+                        }
+
+                        /* Оверлей, которым мы на мгновение "накрываем" страницу перед
+                           перезагрузкой (location.reload), чтобы сгладить моргание:
+                           вместо резкого бело-серого мигания браузера пользователь
+                           видит плавное короткое затемнение/осветление в цвет фона */
+                        #reset-forecast-overlay {
+                            position: fixed;
+                            inset: 0;
+                            background-color: #ffffff;
+                            opacity: 0;
+                            pointer-events: none;
+                            z-index: 999999;
+                            transition: opacity 0.15s ease-in;
+                        }
+                        #reset-forecast-overlay.active {
+                            opacity: 1;
+                            pointer-events: all;
                         }
                     </style>
                 ''', unsafe_allow_html=True)
@@ -1988,8 +2238,34 @@ elif st.session_state.page == 'district':
                 # 2. Простое и надежное смещение кнопки вниз с помощью отступа
                 st.markdown('<div style="margin-top: 280px;"></div>', unsafe_allow_html=True)
 
-                if st.button("🔄 Сброс прогнозных значений", key="reset_forecast_btn", use_container_width=False):
-                    st.rerun()
+                # 3. Кнопка "Сброс прогнозных значений".
+                #    ВАЖНО: раньше здесь был st.button(...) с вызовом st.rerun() —
+                #    но это лишь перезапускало python-скрипт Streamlit, а сами
+                #    расчеты (переключатели "да/нет" в npTable и суммы в
+                #    districtTable) хранятся не на сервере, а прямо в DOM браузера
+                #    (см. JS-функции recalcDistrictToggleTotals / initNpToggles
+                #    ниже по файлу). Поэтому st.rerun() их фактически НЕ сбрасывал.
+                #    Теперь это обычная HTML-кнопка (без атрибута onclick —
+                #    клик обрабатывается делегированным JS-слушателем
+                #    initResetForecastButton() внутри components.html-скрипта,
+                #    см. подробное объяснение там же, почему инлайн-onclick
+                #    оказался ненадежным). По клику она подсвечивает
+                #    полупрозрачный оверлей и через 150 мс запускает
+                #    window.parent.location.reload() — то есть выполняет ПОЛНУЮ
+                #    перезагрузку текущей страницы браузером, как кнопка
+                #    "Обновить эту страницу" в Chrome. При такой перезагрузке
+                #    гарантированно сбрасывается вообще всё: и JS-расчеты в
+                #    DOM, и любые введенные пользователем значения, а сама
+                #    страница отрисовывается заново "с нуля". Небольшая пауза
+                #    перед reload() нужна только для того, чтобы браузер успел
+                #    доиграть анимацию оверлея (полностью убрать моргание при
+                #    настоящей перезагрузке страницы физически невозможно —
+                #    это ограничение самого браузера, но так оно сглаживается).
+                #    Строка ниже намеренно однострочная (без переносов
+                #    внутри HTML) — react-markdown, через который Streamlit
+                #    рендерит unsafe_allow_html-контент, может искажать
+                #    многострочные HTML-блоки/атрибуты.
+                st.markdown('<div id="reset-forecast-overlay"></div><button type="button" id="resetForecastBtn" class="reset-forecast-btn">🔄 Сброс прогнозных значений</button>', unsafe_allow_html=True)
 
             with col_header:
                 st.markdown(f'<h2 style="font-family: var(--font-ui); text-align: center; font-size: 28px !important; font-weight: 700; color: #1a252c; margin-top: -20px; margin-bottom: 5px; letter-spacing: -0.01em;">{region_name}</h2>', unsafe_allow_html=True)
@@ -2125,6 +2401,18 @@ elif st.session_state.page == 'district':
                 else:
                     dist_cells += f'<td>{val if pd.notna(val) else ""}</td>'
 
+            # Таблица districtTable рендерится как обычно, без специальных
+            # оберток. Причина: и sticky на th/tr/td по отдельности (попытка №1,
+            # строки схлопывались друг на друга), и sticky на едином враппере
+            # вокруг таблицы (попытка №2, где-то по цепочке предков Streamlit
+            # обрезает/ограничивает sticky-контекст) не дали нужного результата.
+            # Поэтому фиксацию таблицы при скролле теперь полностью делает JS
+            # (position: fixed) — см. функцию syncDistrictTableSticky в блоке
+            # "8. JS СКРИПТ ДЛЯ СОРТИРОВКИ ТАБЛИЦ". Она ловит скролл через
+            # capture-фазу (см. подробный комментарий в JS), поэтому работает
+            # независимо от того, какой именно элемент физически прокручивается
+            # внутри Streamlit-разметки, — обертка вокруг таблицы для этого
+            # не нужна.
             district_table_html = f"""
             <table id="districtTable">
                 <thead><tr>{dist_header_html}</tr></thead>
