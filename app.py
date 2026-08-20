@@ -1267,6 +1267,7 @@ table tbody tr td.change-neg-custom {{
    .value-flash навешивается через JS (см. flashCell в JS-блоке ниже) на
    каждую ячейку, значение которой было только что пересчитано.
 */
+
 /* Мягкая вспышка в таблицах*/
 @keyframes cellValueFlash {{
     0%   {{ box-shadow: 0 0 0 0 rgba(220, 38, 38, 0.55); background-color: rgba(220, 38, 38, 0.20); }}
@@ -1290,7 +1291,6 @@ td.value-flash {{
     position: relative;
     z-index: 1;
 }}
-
 
 
 /* ===== ЗАГОЛОВОК ПРАВОЙ ЧАСТИ (СТРАНИЦЫ 2 И 3) ===== */
@@ -1495,6 +1495,125 @@ function recalcDistrictToggleTotals(triggeredByUserClick) {
             }
         }
     });
+
+    // После пересчета счетчиков "да" пересчитываем агрегированные показатели
+    // по всей строке района (см. recalcDistrictRowAffordabilityAggregates
+    // ниже по файлу) — п.1-п.6 из отдельного задания на эту функцию.
+    recalcDistrictRowAffordabilityAggregates(npTable, districtTable, districtRow, triggeredByUserClick);
+}
+
+// =====================================================================
+// ПЕРЕСЧЕТ АГРЕГИРОВАННЫХ ПОКАЗАТЕЛЕЙ СТРОКИ РАЙОНА (districtTable)
+// =====================================================================
+// Вызывается из recalcDistrictToggleTotals после пересчета счетчиков "да"
+// по TOGGLE_YES_NO_COLUMNS. Пересчитывает в строке района (последняя строка
+// в теле districtTable) следующие поля на основе ВСЕХ строк населенных
+// пунктов таблицы npTable, относящихся к этому району:
+//   1. "Уровень финансовой доступности Старый" — просто текущее значение
+//      ячейки districtRow ДО пересчета (используется только внутри этой
+//      функции для п.5, отдельной ячейки/колонки под него нет).
+//   2. "Изменение уровня потребности в развитии ДБО за счет альтернативной
+//      инфраструктуры, п.п." = среднее ненулевых значений этой же колонки
+//      по строкам npTable (округление до 1 знака).
+//   3. "Уровень финансовой доступности" = среднее арифметическое этой
+//      колонки по ВСЕМ строкам npTable (без исключения нулевых, в отличие
+//      от п.2 — так задано в требованиях).
+//   4. "Уровень потребности в развитии ДБО с учетом альт. инфраструктуры" =
+//      100% - "Уровень финансовой доступности" + "Изменение уровня
+//      потребности..." (обратите внимание: здесь ПЛЮС, а не минус — это
+//      отличается от формулы для отдельного населенного пункта в
+//      applyAffordabilityForecastForRow/revertAffordabilityForecastForRow,
+//      где вычитается "Бонус"; для строки района формула другая, как прямо
+//      указано в задании на эту функцию).
+//   5. "Прирост финансовой доступности" = новый "Уровень финансовой
+//      доступности" минус "старый" (п.1) — используется только для п.6.
+//   6. "Изменение уровня финансовой доступности к предыдущей отчетной
+//      дате, п.п." — НАКОПИТЕЛЬНОЕ поле, увеличивается на "Прирост
+//      финансовой доступности" (аналогично тому, как это сделано для
+//      отдельного населенного пункта).
+//
+// Форматирование ячеек (проценты с одним знаком после запятой; для полей
+// "Изменение..." — стрелка вверх/зеленый при плюсе, вниз/красный при
+// минусе, без стрелки при нуле) не меняется — используются те же функции
+// setLevelCellValue/setChangeCellValue, что и для строк населенных пунктов.
+//
+// triggeredByUserClick прокидывается из recalcDistrictToggleTotals и
+// определяет, нужна ли визуальная "вспышка" при обновлении ячеек (см.
+// пояснение в recalcDistrictToggleTotals про фоновые подстраховочные
+// пересчеты по таймеру, которые не должны мигать вспышкой на загрузке
+// страницы).
+function recalcDistrictRowAffordabilityAggregates(npTable, districtTable, districtRow, triggeredByUserClick) {
+    const districtCells = getAffordabilityCells(districtTable, districtRow);
+    if (!districtCells) return;
+    const { levelCell, levelChangeCell, needCell, needChangeCell } = districtCells;
+
+    const npLevelColIdx = getColumnIndexByName(npTable, "Уровень финансовой доступности");
+    const npNeedChangeColIdx = getColumnIndexByName(npTable, "Изменение уровня потребности в развитии дистанционного банковского обслуживания за счет альтернативной инфраструктуры, п.п.");
+    if (npLevelColIdx === -1 || npNeedChangeColIdx === -1) return;
+
+    const npRows = Array.from(npTable.tBodies[0].rows);
+    if (npRows.length === 0) return;
+
+    // --- п.1: "Уровень финансовой доступности Старый" (значение до пересчета) ---
+    const oldLevel = parseNumericCellValue(levelCell.textContent);
+
+    // --- п.2: среднее НЕНУЛЕВЫХ значений "Изменение уровня потребности..."
+    // по всем населенным пунктам района (округление до 1 знака) ---
+    let needChangeSum = 0;
+    let needChangeCount = 0;
+    npRows.forEach(row => {
+        const cell = row.cells[npNeedChangeColIdx];
+        if (!cell) return;
+        const val = parseNumericCellValue(cell.textContent);
+        if (val !== 0) {
+            needChangeSum += val;
+            needChangeCount += 1;
+        }
+    });
+    const needChangeAvg = needChangeCount > 0
+        ? Math.round((needChangeSum / needChangeCount) * 10) / 10
+        : 0;
+
+    // --- п.3: среднее арифметическое "Уровня финансовой доступности" по
+    // ВСЕМ населенным пунктам района (нулевые значения здесь НЕ исключаются,
+    // в отличие от п.2 — так задано в требованиях) ---
+    let levelSum = 0;
+    npRows.forEach(row => {
+        const cell = row.cells[npLevelColIdx];
+        if (cell) levelSum += parseNumericCellValue(cell.textContent);
+    });
+    const newLevel = Math.round((levelSum / npRows.length) * 10) / 10;
+
+    // --- п.4: "Уровень потребности..." = 100% - Уровень + Изменение уровня
+    // потребности (обратите внимание на знак "+", см. пояснение в шапке
+    // функции). Math.max(0, ...) — защитный "пол" от ухода в минус, в
+    // задании явно не оговорен, но предотвращает отрицательные проценты. ---
+    const needLevel = Math.max(0, 100 - newLevel + needChangeAvg);
+
+    // --- п.5: "Прирост финансовой доступности" ---
+    const levelGain = newLevel - oldLevel;
+
+    // !!triggeredByUserClick — важно явно привести к boolean (true/false), а
+    // не передавать triggeredByUserClick как есть: если он undefined (фоновый
+    // вызов из setInterval, где параметр вообще не передается), JS-параметр
+    // со значением по умолчанию "shouldFlash = true" в setLevelCellValue/
+    // setChangeCellValue сработал бы именно на undefined и включил бы
+    // вспышку — что и является тем самым глюком, который мы чинили ранее.
+    const shouldFlash = !!triggeredByUserClick;
+
+    // --- Обновляем "Уровень финансовой доступности" строки района ---
+    setLevelCellValue(levelCell, newLevel, shouldFlash);
+
+    // --- п.6: "Изменение уровня фин. доступности к пред. отчетной дате,
+    // п.п." — накопительно, += Прирост ---
+    const prevLevelChange = parseNumericCellValue(levelChangeCell.textContent);
+    setChangeCellValue(levelChangeCell, prevLevelChange + levelGain, shouldFlash);
+
+    // --- Обновляем "Уровень потребности в развитии ДБО..." ---
+    setLevelCellValue(needCell, needLevel, shouldFlash);
+
+    // --- Обновляем "Изменение уровня потребности..." значением, посчитанным в п.2 ---
+    setChangeCellValue(needChangeCell, needChangeAvg, shouldFlash);
 }
 
 // =====================================================================
@@ -1576,11 +1695,18 @@ function flashCell(cell) {
 // финансовой доступности" / "Уровень потребности в развитии ДБО ...".
 // Класс всегда пустой — как и при первичном рендере этих колонок в Python
 // (get_need_level_class возвращает "" для обеих, см. функцию в начале файла).
-function setLevelCellValue(cell, numVal) {
+// shouldFlash (по умолчанию true) — запускать ли визуальную "вспышку"
+// (flashCell). По умолчанию true, т.к. существующие вызовы этой функции
+// (из applyAffordabilityForecastForRow / revertAffordabilityForecastForRow)
+// всегда происходят в ответ на настоящий клик пользователя. Параметр
+// добавлен для recalcDistrictRowAffordabilityAggregates, которая вызывается
+// в том числе из фоновых подстраховочных пересчетов по таймеру — там
+// вспышка должна быть отключена (см. пояснение в recalcDistrictToggleTotals).
+function setLevelCellValue(cell, numVal, shouldFlash = true) {
     if (!cell) return;
     cell.className = "";
     cell.textContent = numVal.toFixed(1) + "%";
-    flashCell(cell);
+    if (shouldFlash) flashCell(cell);
 }
 
 // Записывает новое значение в ячейку "Изменение уровня ..., п.п." с той же
@@ -1588,7 +1714,8 @@ function setLevelCellValue(cell, numVal) {
 // БЛОК" в блоке формирования district_table_html / np_table_html ниже по
 // файлу): положительное — зеленым со стрелкой вверх, отрицательное —
 // красным со стрелкой вниз, ноль — без стрелки и без особого цвета.
-function setChangeCellValue(cell, numVal) {
+// shouldFlash — см. пояснение к этому же параметру в setLevelCellValue выше.
+function setChangeCellValue(cell, numVal, shouldFlash = true) {
     if (!cell) return;
     const rounded = Math.round(numVal * 10) / 10; // округление до 1 знака, как python ":.1f"
     let cssClass = "";
@@ -1605,7 +1732,7 @@ function setChangeCellValue(cell, numVal) {
     }
     cell.className = cssClass;
     cell.innerHTML = arrow + " " + formatted;
-    flashCell(cell);
+    if (shouldFlash) flashCell(cell);
 }
 
 // Находит все 4 ячейки, с которыми работает пересчет, для данной строки
