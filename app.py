@@ -1259,6 +1259,39 @@ table tbody tr td.change-neg-custom {{
     font-weight: bold !important; 
 }}
 
+/* ===== ВИЗУАЛЬНАЯ "ВСПЫШКА" ПРИ ПРОГНОЗНОМ ПЕРЕСЧЕТЕ ЗНАЧЕНИЙ (npTable) ===== */
+/* По просьбе заказчика: просто смена цифр (даже жирным шрифтом/другим цветом)
+   в ячейке — незаметна. Добавляем короткую анимацию "круги по воде": ячейка
+   на мгновение подсвечивается и от нее расходится затухающая красная обводка
+   (через box-shadow с растущим радиусом и убывающей прозрачностью). Класс
+   .value-flash навешивается через JS (см. flashCell в JS-блоке ниже) на
+   каждую ячейку, значение которой было только что пересчитано.
+*/
+/* Мягкая вспышка в таблицах*/
+@keyframes cellValueFlash {{
+    0%   {{ box-shadow: 0 0 0 0 rgba(220, 38, 38, 0.55); background-color: rgba(220, 38, 38, 0.20); }}
+    60%  {{ box-shadow: 0 0 0 14px rgba(220, 38, 38, 0); background-color: rgba(220, 38, 38, 0.06); }}
+    100% {{ box-shadow: 0 0 0 14px rgba(220, 38, 38, 0); background-color: transparent; }}
+}}
+td.value-flash {{
+    animation: cellValueFlash 0.9s ease-out;
+    position: relative;
+    z-index: 1;
+}}
+
+/* Яркая вспышка в таблицах*/
+@keyframes cellValueFlash {{
+    0%   {{ box-shadow: 0 0 0 0 rgba(255, 0, 0, 0.85); background-color: rgba(255, 0, 0, 0.45); }}
+    60%  {{ box-shadow: 0 0 0 16px rgba(255, 0, 0, 0); background-color: rgba(255, 0, 0, 0.10); }}
+    100% {{ box-shadow: 0 0 0 16px rgba(255, 0, 0, 0); background-color: transparent; }}
+}}
+td.value-flash {{
+    animation: cellValueFlash 1.0s ease-out;
+    position: relative;
+    z-index: 1;
+}}
+
+
 
 /* ===== ЗАГОЛОВОК ПРАВОЙ ЧАСТИ (СТРАНИЦЫ 2 И 3) ===== */
 .right-panel-title {{
@@ -1398,8 +1431,29 @@ function getColumnIndexByName(table, colName) {
 }
 
 // Пересчитывает суммарное количество "да" по каждому переключателю
-// в npTable и обновляет соответствующие ячейки строки района в districtTable
-function recalcDistrictToggleTotals() {
+// в npTable и обновляет соответствующие ячейки строки района в districtTable.
+// Дополнительно: если пересчитанное значение действительно изменилось,
+// ячейка districtTable подсвечивается той же "вспышкой" (flashCell), что и
+// пересчитанные ячейки строки населенного пункта в npTable — чтобы изменение
+// было заметно одновременно в обеих таблицах. Функция flashCell объявлена
+// ниже по файлу (в блоке "ПРОГНОЗНЫЙ ПЕРЕСЧЕТ..."), но т.к. это объявление
+// function (а не const/let), оно поднимается (hoisting) и доступно здесь.
+//
+// Параметр triggeredByUserClick (по умолчанию false) — ИСПРАВЛЕНИЕ ГЛЮКА:
+// эта функция вызывается из ДВУХ мест — (1) сразу после клика пользователя
+// по стрелочке "да/нет" и (2) каждые 500мс из общего setInterval как
+// подстраховка на случай, если Streamlit пересоздаст DOM таблиц. В момент
+// самой загрузки страницы npTable иногда еще не успевает полностью
+// отрисоваться к моменту очередного тика таймера — тогда подсчет "да" по
+// неполному набору строк дает временно неверное число, которое на следующем
+// тике (когда таблица уже полностью на месте) само исправляется. Раньше
+// вспышка запускалась в обоих случаях, из-за чего при загрузке было видно
+// "неверное число + вспышка -> верное число + еще одна вспышка". Теперь
+// вспышка включается ТОЛЬКО когда пересчет вызван настоящим кликом
+// пользователя (triggeredByUserClick === true); фоновые подстраховочные
+// пересчеты по таймеру по-прежнему тихо досчитывают правильное число, но
+// без визуального эффекта.
+function recalcDistrictToggleTotals(triggeredByUserClick) {
     const npTable = parentDoc.getElementById("npTable");
     const districtTable = parentDoc.getElementById("districtTable");
     if (!npTable || !districtTable) return;
@@ -1426,12 +1480,305 @@ function recalcDistrictToggleTotals() {
 
         const distCell = districtRow.cells[distColIndex];
         if (distCell) {
-            distCell.textContent = String(count);
+            const newValue = String(count);
+            // "Вспышку" запускаем только если значение реально поменялось —
+            // recalcDistrictToggleTotals вызывается на каждый клик по любому
+            // из трех переключателей и пересчитывает все три колонки сразу,
+            // поэтому без этой проверки подсвечивались бы и те ячейки,
+            // которые в этот раз не изменились. И только если это настоящий
+            // клик пользователя (см. пояснение к параметру выше).
+            if (distCell.textContent !== newValue) {
+                distCell.textContent = newValue;
+                if (triggeredByUserClick) {
+                    flashCell(distCell);
+                }
+            }
         }
     });
 }
 
-// Инициализирует переключатель "да/нет" в npTable через делегирование событий.
+// =====================================================================
+// ПРОГНОЗНЫЙ ПЕРЕСЧЕТ УРОВНЯ ФИН. ДОСТУПНОСТИ И ПОТРЕБНОСТИ В ДБО (npTable)
+// =====================================================================
+// При переключении "да/нет" в колонках TOGGLE_YES_NO_COLUMNS для конкретного
+// населенного пункта (строки npTable) дополнительно пересчитываются:
+//   - "Уровень финансовой доступности" (п.1, п.2 задания)
+//   - "Изменение уровня финансовой доступности к предыдущей отчетной дате, п.п."
+//     (п.7 задания — значение НАКОПИТЕЛЬНОЕ, прибавляется к уже показанному)
+//   - "Уровень потребности в развитии дистанционного банковского обслуживания
+//     с учетом альтернативной инфраструктуры" (п.5 задания)
+//   - "Изменение уровня потребности в развитии дистанционного банковского
+//     обслуживания за счет альтернативной инфраструктуры, п.п." (п.6 задания)
+//
+// ОБНОВЛЕНО: изначально в задании все правила были сформулированы только
+// для направления "нет" -> "да" (см. историю в комментариях ниже к каждому
+// пункту). По отдельному запросу заказчика добавлен СИММЕТРИЧНЫЙ ОТКАТ при
+// обратном переключении ("да" -> "нет") — см. блок "ОТКАТ ПРОГНОЗНОГО
+// ПЕРЕСЧЕТА" ниже, сразу после applyAffordabilityForecastForRow. Чтобы откат
+// был математически точным (а не просто "пересчитать заново по формуле",
+// что могло бы разойтись со значением на экране из-за ограничения уровня в
+// 100% или порядка последовательных кликов по разным колонкам), в момент
+// начисления (applyAffordabilityForecastForRow) величина фактически
+// начисленного прироста и бонуса сохраняется в data-атрибуте строки
+// (см. getAffordabilityAppliedState/setAffordabilityAppliedState), а при
+// откате вычитается РОВНО ТА ЖЕ величина, что была прибавлена.
+
+// Прибавка к "Уровню финансовой доступности" при переключении колонки в "да"
+// (п.1 — 5%, п.2 — 18.5%). У "Количество Финансовых помощников" прибавки к
+// уровню нет — она участвует только в расчете "Бонуса" (см. ниже).
+const AFFORDABILITY_LEVEL_DELTA = {
+    'Количество точек финансового доступа': 5,
+    'Количество торговых точек с сервисом "Выдача наличных на кассе"': 18.5,
+};
+
+// Таблица "Бонуса" (п.4): диапазон "Уровня финансовой доступности" (ПОСЛЕ
+// прибавки по п.1/п.2 текущего клика) -> прибавка за добавленную
+// "Количество точек финансового доступа" (pointBonus) и за добавленную
+// "Количество Финансовых помощников" (helperBonus). "Количество торговых
+// точек ..." в расчете Бонуса не участвует (в задании для нее бонус не
+// определен — только прибавка к уровню, см. п.2).
+const AFFORDABILITY_BONUS_TABLE = [
+    { maxExclusive: 31,       pointBonus: 4, helperBonus: 6 }, // п.4.1: 0 – <31%
+    { maxExclusive: 46,       pointBonus: 3, helperBonus: 5 }, // п.4.2: 31 – <46%
+    { maxExclusive: 66,       pointBonus: 2, helperBonus: 4 }, // п.4.3: 46 – <66%
+    { maxExclusive: 86,       pointBonus: 1, helperBonus: 3 }, // п.4.4: 66 – <86%
+    { maxExclusive: Infinity, pointBonus: 0, helperBonus: 2 }, // п.4.5: 86 – 100%
+];
+
+function getAffordabilityBonusRates(levelPercent) {
+    for (const bracket of AFFORDABILITY_BONUS_TABLE) {
+        if (levelPercent < bracket.maxExclusive) return bracket;
+    }
+    return AFFORDABILITY_BONUS_TABLE[AFFORDABILITY_BONUS_TABLE.length - 1];
+}
+
+// Извлекает число из текста ячейки вида "85.0%", "⬆ +3.0", "⬇ -2.0", "0.0"
+function parseNumericCellValue(text) {
+    if (!text) return 0;
+    const match = String(text).replace(/,/g, ".").match(/[+-]?\\d+(\\.\\d+)?/);
+    return match ? parseFloat(match[0]) : 0;
+}
+
+// Короткая цветовая "вспышка" на ячейке (см. @keyframes cellValueFlash в CSS
+// выше по файлу) — чтобы пересчитанное значение было заметно визуально, а не
+// только "тихо" менялось в тексте. Класс сначала снимается, затем (после
+// принудительного reflow через чтение offsetWidth) добавляется заново —
+// иначе при повторном срабатывании подряд на той же ячейке анимация CSS не
+// перезапускается браузером.
+function flashCell(cell) {
+    if (!cell) return;
+    cell.classList.remove("value-flash");
+    void cell.offsetWidth;
+    cell.classList.add("value-flash");
+}
+
+// Записывает новое значение в проценто-ячейку без стрелки: "Уровень
+// финансовой доступности" / "Уровень потребности в развитии ДБО ...".
+// Класс всегда пустой — как и при первичном рендере этих колонок в Python
+// (get_need_level_class возвращает "" для обеих, см. функцию в начале файла).
+function setLevelCellValue(cell, numVal) {
+    if (!cell) return;
+    cell.className = "";
+    cell.textContent = numVal.toFixed(1) + "%";
+    flashCell(cell);
+}
+
+// Записывает новое значение в ячейку "Изменение уровня ..., п.п." с той же
+// цветовой логикой, что и при первичном рендере в Python (см. "ДОБАВЛЕННЫЙ
+// БЛОК" в блоке формирования district_table_html / np_table_html ниже по
+// файлу): положительное — зеленым со стрелкой вверх, отрицательное —
+// красным со стрелкой вниз, ноль — без стрелки и без особого цвета.
+function setChangeCellValue(cell, numVal) {
+    if (!cell) return;
+    const rounded = Math.round(numVal * 10) / 10; // округление до 1 знака, как python ":.1f"
+    let cssClass = "";
+    let arrow = "";
+    let formatted = "0.0";
+    if (rounded > 0) {
+        cssClass = "change-pos-custom";
+        arrow = "&#11014;";
+        formatted = "+" + rounded.toFixed(1);
+    } else if (rounded < 0) {
+        cssClass = "change-neg-custom";
+        arrow = "&#11015;";
+        formatted = rounded.toFixed(1);
+    }
+    cell.className = cssClass;
+    cell.innerHTML = arrow + " " + formatted;
+    flashCell(cell);
+}
+
+// Находит все 4 ячейки, с которыми работает пересчет, для данной строки
+// npTable. Вынесено в отдельную функцию, т.к. используется и при начислении
+// (applyAffordabilityForecastForRow), и при откате
+// (revertAffordabilityForecastForRow) — чтобы не дублировать один и тот же
+// поиск колонок дважды.
+function getAffordabilityCells(npTable, row) {
+    const levelColIdx = getColumnIndexByName(npTable, "Уровень финансовой доступности");
+    const levelChangeColIdx = getColumnIndexByName(npTable, "Изменение уровня финансовой доступности к предыдущей отчетной дате, п.п.");
+    const needColIdx = getColumnIndexByName(npTable, "Уровень потребности в развитии дистанционного банковского обслуживания с учетом альтернативной инфраструктуры");
+    const needChangeColIdx = getColumnIndexByName(npTable, "Изменение уровня потребности в развитии дистанционного банковского обслуживания за счет альтернативной инфраструктуры, п.п.");
+    if (levelColIdx === -1 || levelChangeColIdx === -1 || needColIdx === -1 || needChangeColIdx === -1) return null;
+
+    const levelCell = row.cells[levelColIdx];
+    const levelChangeCell = row.cells[levelChangeColIdx];
+    const needCell = row.cells[needColIdx];
+    const needChangeCell = row.cells[needChangeColIdx];
+    if (!levelCell || !levelChangeCell || !needCell || !needChangeCell) return null;
+
+    return { levelCell, levelChangeCell, needCell, needChangeCell };
+}
+
+// Читает/пишет "журнал начислений" по строке — сколько именно (levelGain,
+// bonusGain) было прибавлено по каждой из колонок TOGGLE_YES_NO_COLUMNS в
+// момент последнего включения ("нет" -> "да"). Именно эти сохраненные
+// значения используются при обратном переключении, чтобы откат был точным.
+function getAffordabilityAppliedState(row) {
+    if (!row.dataset.affordabilityApplied) return {};
+    try {
+        return JSON.parse(row.dataset.affordabilityApplied) || {};
+    } catch (e) {
+        return {};
+    }
+}
+function setAffordabilityAppliedState(row, state) {
+    row.dataset.affordabilityApplied = JSON.stringify(state);
+}
+
+// Основной пересчет (п.0–п.7 задания) для ОДНОЙ строки npTable — вызывается
+// из initNpToggles сразу после того, как пользователь переключил "нет" -> "да"
+// в одной из колонок TOGGLE_YES_NO_COLUMNS для этого населенного пункта.
+// За откат обратного переключения ("да" -> "нет") отвечает отдельная функция
+// revertAffordabilityForecastForRow сразу ниже.
+function applyAffordabilityForecastForRow(npTable, row, colName) {
+    const cells = getAffordabilityCells(npTable, row);
+    if (!cells) return;
+    const { levelCell, levelChangeCell, needCell, needChangeCell } = cells;
+
+    // Защита от повторного начисления: если по этой колонке в этой строке
+    // эффект уже применен (запись есть в "журнале"), повторно ничего не
+    // начисляем — иначе накопительные поля (п.7) задвоились бы.
+    const appliedState = getAffordabilityAppliedState(row);
+    if (appliedState[colName]) return;
+
+    // --- п.0: "Уровень финансовой доступности Старый" ---
+    const oldLevel = parseNumericCellValue(levelCell.textContent);
+
+    // --- п.1, п.2: прибавка к уровню финансовой доступности (не выше 100%) ---
+    const levelDelta = AFFORDABILITY_LEVEL_DELTA[colName] || 0;
+    const newLevel = Math.min(100, oldLevel + levelDelta);
+
+    // --- п.3: "Прирост финансовой доступности" ---
+    const levelGain = newLevel - oldLevel;
+
+    // --- п.4: "Бонус" — накопительный, хранится в data-атрибуте строки
+    // (в самой таблице отдельной колонки для него нет, он используется
+    // только для расчета двух полей "Уровень/Изменение уровня потребности...")
+    const bonusRates = getAffordabilityBonusRates(newLevel);
+    let bonusGain = 0;
+    if (colName === "Количество точек финансового доступа") {
+        bonusGain = bonusRates.pointBonus;
+    } else if (colName === "Количество Финансовых помощников") {
+        bonusGain = bonusRates.helperBonus;
+    }
+
+    // Запоминаем в "журнале", сколько именно было начислено по этой колонке —
+    // ЭТО и есть основа для точного симметричного отката при выключении.
+    appliedState[colName] = { levelGain, bonusGain };
+    setAffordabilityAppliedState(row, appliedState);
+
+    const bonusTotal = parseFloat(row.dataset.affordabilityBonus || "0") + bonusGain;
+    row.dataset.affordabilityBonus = String(bonusTotal);
+
+    // --- Обновляем "Уровень финансовой доступности" ---
+    setLevelCellValue(levelCell, newLevel);
+
+    // --- п.7: "Изменение уровня фин. доступности к пред. отчетной дате, п.п." (накопительно) ---
+    const prevLevelChange = parseNumericCellValue(levelChangeCell.textContent);
+    setChangeCellValue(levelChangeCell, prevLevelChange + levelGain);
+
+    // --- п.5: "Уровень потребности в развитии ДБО с учетом альт. инфраструктуры" ---
+    // Math.max(0, ...) — защитный "пол", в задании не оговорен явно, но
+    // предотвращает уход в отрицательные проценты, если Бонус окажется
+    // больше остатка (100 - Уровень).
+    const needLevel = Math.max(0, 100 - newLevel - bonusTotal);
+    setLevelCellValue(needCell, needLevel);
+
+    // --- п.6: "Изменение уровня потребности ... за счет альт. инфраструктуры, п.п." ---
+    setChangeCellValue(needChangeCell, -bonusTotal);
+}
+
+// =====================================================================
+// ОТКАТ ПРОГНОЗНОГО ПЕРЕСЧЕТА ПРИ ОБРАТНОМ ПЕРЕКЛЮЧЕНИИ ("да" -> "нет")
+// =====================================================================
+// Отдельный, локализованный кусок кода (по запросу заказчика): при
+// выключении тумблера в одной из колонок TOGGLE_YES_NO_COLUMNS полностью
+// СИММЕТРИЧНО отменяется эффект, ранее начисленный ЭТОЙ ЖЕ колонкой этой же
+// строке функцией applyAffordabilityForecastForRow выше.
+//
+// Принцип отката: НЕ пересчитываем формулы заново "с нуля" (это могло бы
+// разойтись с тем, что реально показано на экране — например, из-за
+// ограничения уровня в 100%, которое могло "срезать" фактически начисленный
+// прирост), а вычитаем ровно ту величину (levelGain/bonusGain), которая была
+// сохранена в "журнале начислений" (getAffordabilityAppliedState) в момент
+// включения этой же колонки.
+//
+// Если по этой колонке в этой строке ничего не было начислено (тумблер
+// выключали, ни разу не включив, либо эффект уже был отменен ранее) —
+// откатывать нечего, функция ничего не делает.
+function revertAffordabilityForecastForRow(npTable, row, colName) {
+    const appliedState = getAffordabilityAppliedState(row);
+    const applied = appliedState[colName];
+    if (!applied) return; // нечего откатывать
+
+    const cells = getAffordabilityCells(npTable, row);
+    if (!cells) return;
+    const { levelCell, levelChangeCell, needCell, needChangeCell } = cells;
+
+    // --- Откат п.1/п.2: вычитаем ровно тот прирост уровня, что был начислен ---
+    const oldLevel = parseNumericCellValue(levelCell.textContent);
+    const newLevel = Math.min(100, Math.max(0, oldLevel - applied.levelGain));
+
+    // --- Откат п.4: вычитаем ровно тот бонус, что был начислен этой колонкой ---
+    const bonusTotal = Math.max(0, parseFloat(row.dataset.affordabilityBonus || "0") - applied.bonusGain);
+    row.dataset.affordabilityBonus = String(bonusTotal);
+
+    // Запись об этой колонке в "журнале" больше не актуальна: при следующем
+    // включении эффект будет посчитан заново, исходя из уровня на тот момент.
+    delete appliedState[colName];
+    setAffordabilityAppliedState(row, appliedState);
+
+    // --- Обновляем "Уровень финансовой доступности" ---
+    setLevelCellValue(levelCell, newLevel);
+
+    // --- Откат п.7: из накопленного "Изменения уровня фин. доступности к
+    // пред. отчетной дате, п.п." вычитаем ровно тот прирост, что был в него
+    // добавлен при включении этой колонки ---
+    const prevLevelChange = parseNumericCellValue(levelChangeCell.textContent);
+    setChangeCellValue(levelChangeCell, prevLevelChange - applied.levelGain);
+
+    // --- п.5, п.6 пересчитываются от уже обновленных newLevel/bonusTotal —
+    // это не "пересчет с нуля", а прямое следствие формул из задания,
+    // поэтому расхождений с applyAffordabilityForecastForRow не возникает ---
+    const needLevel = Math.max(0, 100 - newLevel - bonusTotal);
+    setLevelCellValue(needCell, needLevel);
+
+    setChangeCellValue(needChangeCell, -bonusTotal);
+}
+
+// Диспетчер: вызывается из initNpToggles при любом переключении тумблера в
+// npTable и направляет выполнение либо в начисление (applyAffordabilityForecastForRow),
+// либо в симметричный откат (revertAffordabilityForecastForRow) — в
+// зависимости от направления переключения.
+function syncAffordabilityForecastForRow(npTable, row, colName, newState) {
+    if (newState === "yes") {
+        applyAffordabilityForecastForRow(npTable, row, colName);
+    } else {
+        revertAffordabilityForecastForRow(npTable, row, colName);
+    }
+}
+
+
 // Обработчик клика вешается ОДИН РАЗ на parentDoc (а не на каждую кнопку),
 // поэтому переключатель продолжает работать даже после того, как Streamlit
 // перерисовывает HTML-блок с таблицей (например, при любом ререндере страницы),
@@ -1457,7 +1804,32 @@ function initNpToggles() {
         if (cell.dataset.state !== newState) {
             cell.dataset.state = newState;
             if (valueSpan) valueSpan.textContent = newState === "yes" ? "да" : "нет";
-            recalcDistrictToggleTotals();
+
+            // Определяем имя колонки этой ячейки (по data-colname заголовка
+            // на том же индексе), чтобы применить прогнозный пересчет
+            // "Уровня финансовой доступности" и связанных полей для этой
+            // строки — как при включении ("нет" -> "да", начисление,
+            // applyAffordabilityForecastForRow), так и при выключении
+            // ("да" -> "нет", симметричный откат,
+            // revertAffordabilityForecastForRow). Направление определяет
+            // диспетчер syncAffordabilityForecastForRow (см. выше по файлу).
+            const npTable = cell.closest("table#npTable");
+            const row = cell.closest("tr");
+            if (npTable && row) {
+                const colIndex = Array.from(row.cells).indexOf(cell);
+                const headerCell = npTable.tHead && npTable.tHead.rows[0]
+                    ? npTable.tHead.rows[0].cells[colIndex]
+                    : null;
+                const colName = headerCell ? headerCell.dataset.colname : null;
+                if (colName && TOGGLE_YES_NO_COLUMNS.includes(colName)) {
+                    syncAffordabilityForecastForRow(npTable, row, colName, newState);
+                }
+            }
+
+            // triggeredByUserClick = true — это настоящий клик пользователя,
+            // поэтому изменившиеся ячейки districtTable подсвечиваются
+            // вспышкой (см. пояснение к параметру в recalcDistrictToggleTotals).
+            recalcDistrictToggleTotals(true);
         }
     });
 }
@@ -1687,6 +2059,11 @@ setInterval(() => {
     makeSortable("npTable");
     lockSelectInput();
     initNpToggles();
+    // triggeredByUserClick не передан (undefined -> false) — это фоновая
+    // подстраховочная синхронизация по таймеру, а не реакция на клик,
+    // поэтому вспышка здесь НЕ запускается (см. пояснение в
+    // recalcDistrictToggleTotals — это и есть исправление глюка с
+    // "неверное число на загрузке + вспышка -> верное число + вспышка").
     recalcDistrictToggleTotals();
     initResetForecastButton();   // навешивает делегированный обработчик клика (один раз)
     initDistrictTableSticky();   // навешивает scroll/resize-обработчики (один раз)
