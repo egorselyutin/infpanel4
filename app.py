@@ -225,6 +225,106 @@ def load_np_data(file_name):
             lambda x: int(round(float(x))) if pd.notna(x) else 0)
     return df
 
+# =============================================================================
+# АГРЕГАТЫ ПО НАСЕЛЕННЫМ ПУНКТАМ "ВНЕ ТЕКУЩЕГО РАЙОНА" ДЛЯ СТРОКИ ОБЛАСТИ
+# (districtTable, страница 4, "СЦЕНАРИЙ №4")
+# =============================================================================
+# Используются в recalcOblastRowAffordabilityAggregates (JS, см. sorting_script
+# ниже по файлу) для пересчета показателей строки "Новосибирская область".
+# Подробное обоснование выбранного алгоритма — см. комментарий в шапке
+# recalcOblastRowAffordabilityAggregates в JS; вкратце: населенные пункты вне
+# текущего района не меняются действиями пользователя на этой странице,
+# поэтому суммы/счетчики по ним считаются здесь, В PYTHON, ОДИН РАЗ за
+# загрузку страницы (с кэшированием через st.cache_data), а не пересчитываются
+# в браузере на каждый клик по тысячам строк.
+
+# Названия колонок, из которых считаются агрегаты, — те же самые строки, что
+# используются для поиска этих колонок в JS (getAffordabilityCells).
+AFFORDABILITY_LEVEL_COL = "Уровень финансовой доступности"
+AFFORDABILITY_NEED_CHANGE_COL = "Изменение уровня потребности в развитии дистанционного банковского обслуживания за счет альтернативной инфраструктуры, п.п."
+
+def _parse_percent_like_value(val):
+    """Числовой парсинг значения колонки "Уровень ...", ЗЕРКАЛЬНО повторяющий
+    логику, которая уже используется при рендере такой же ячейки в npTable
+    (см. цикл построения np_rows_html ниже по файлу): убираем '%', заменяем
+    ',' на '.', и если получившееся число <= 1.0 — трактуем его как долю и
+    домножаем на 100. Любая ошибка/NaN -> 0.0 (совместимо с тем, как
+    JS-функция parseNumericCellValue возвращает 0 для пустой/нечисловой
+    ячейки — это важно, чтобы Python- и JS-расчеты не расходились)."""
+    if pd.isna(val):
+        return 0.0
+    try:
+        num_val = float(str(val).replace('%', '').replace(',', '.').strip())
+        if num_val <= 1.0:
+            num_val *= 100
+        return num_val
+    except (ValueError, TypeError):
+        return 0.0
+
+def _parse_plain_decimal_value(val):
+    """Числовой парсинг значения колонки "Изменение уровня ...": только
+    запятая -> точка, без домножения на 100 (в отличие от _parse_percent_like_value
+    выше) — точно так же, как при рендере такой же ячейки в npTable/
+    districtTable. NaN/ошибка -> 0.0."""
+    if pd.isna(val):
+        return 0.0
+    try:
+        return float(str(val).replace(',', '.').strip())
+    except (ValueError, TypeError):
+        return 0.0
+
+@st.cache_data
+def compute_other_districts_affordability_aggregates(np_file_path, region_name):
+    """Возвращает суммы/счетчики по колонкам AFFORDABILITY_LEVEL_COL и
+    AFFORDABILITY_NEED_CHANGE_COL для ВСЕХ населенных пунктов файла
+    np_file_path (DB{date}_NP.xlsx), ЗА ИСКЛЮЧЕНИЕМ населенных пунктов
+    текущего района (region_name) — их живые (пересчитанные пользователем)
+    значения берутся отдельно из npTable непосредственно в браузере
+    (см. computeNpTableAffordabilitySums в JS).
+
+    Результат кэшируется (@st.cache_data) по паре (np_file_path, region_name):
+    при повторном открытии той же страницы того же района с теми же данными
+    файл не перечитывается и суммы не пересчитываются заново — обычная для
+    Streamlit оптимизация "запомнить результат чистой функции по ее
+    аргументам", которая идеально подходит для такого рода один раз в сессию
+    вычисляемых агрегатов.
+    """
+    empty_result = {
+        "otherLevelSum": 0.0, "otherLevelCount": 0,
+        "otherNeedChangeSum": 0.0, "otherNeedChangeCount": 0,
+    }
+
+    df = load_np_data(np_file_path)
+    if df is None or df.empty or "Район" not in df.columns:
+        return empty_result
+
+    other_mask = df["Район"].astype(str).str.strip() != str(region_name).strip()
+    other_df = df[other_mask]
+
+    other_level_count = int(len(other_df))
+    other_level_sum = 0.0
+    other_need_change_sum = 0.0
+    other_need_change_count = 0
+
+    if AFFORDABILITY_LEVEL_COL in other_df.columns:
+        other_level_sum = float(sum(
+            _parse_percent_like_value(v) for v in other_df[AFFORDABILITY_LEVEL_COL]
+        ))
+
+    if AFFORDABILITY_NEED_CHANGE_COL in other_df.columns:
+        for v in other_df[AFFORDABILITY_NEED_CHANGE_COL]:
+            num_val = _parse_plain_decimal_value(v)
+            if num_val != 0:
+                other_need_change_sum += num_val
+                other_need_change_count += 1
+
+    return {
+        "otherLevelSum": round(other_level_sum, 4),
+        "otherLevelCount": other_level_count,
+        "otherNeedChangeSum": round(other_need_change_sum, 4),
+        "otherNeedChangeCount": other_need_change_count,
+    }
+
 @st.cache_data
 def load_indicators(file_path):
     if not os.path.exists(file_path):
@@ -1259,28 +1359,34 @@ table tbody tr td.change-neg-custom {{
     font-weight: bold !important; 
 }}
 
-/* ===== ВИЗУАЛЬНАЯ "ВСПЫШКА" ПРИ ПРОГНОЗНОМ ПЕРЕСЧЕТЕ ЗНАЧЕНИЙ (npTable) ===== */
+/* ===== ВИЗУАЛЬНАЯ "ВСПЫШКА" ПРИ ПРОГНОЗНОМ ПЕРЕСЧЕТЕ ЗНАЧЕНИЙ (npTable, districtTable) ===== */
 /* По просьбе заказчика: просто смена цифр (даже жирным шрифтом/другим цветом)
    в ячейке — незаметна. Добавляем короткую анимацию "круги по воде": ячейка
    на мгновение подсвечивается и от нее расходится затухающая красная обводка
    (через box-shadow с растущим радиусом и убывающей прозрачностью). Класс
    .value-flash навешивается через JS (см. flashCell в JS-блоке ниже) на
    каждую ячейку, значение которой было только что пересчитано.
+
+   ВАЖНЫЙ НЮАНС про ячейки "Уровень потребности..." в строках области/района,
+   которые дополнительно заливаются цветом через классы .need-level-* с
+   background-color: ... !important (см. applyNeedLevelFill в setLevelCellValue):
+   анимация здесь висит ПРЯМО на фоне td (как и просили), поэтому пробовать
+   перебить !important самой анимацией бессмысленно — !important внутри
+   @keyframes браузеры по спецификации CSS игнорируют, а обычная (без
+   !important) анимация background-color в любом случае имеет более низкий
+   приоритет в каскаде, чем !important-правило .need-level-*.
+   Более ранняя попытка обойти это через отдельный слой (::after с
+   абсолютным позиционированием и растущим box-shadow) визуально ломалась:
+   box-shadow на псевдоэлементе выходил за границы td и накладывался на
+   соседние ячейки, из-за чего вспышки выглядели как отдельные разъезжающиеся
+   прямоугольники разного размера.
+   Вместо слоев — ОЧЕРЕДНОСТЬ (реализована в JS, в setLevelCellValue): для
+   ячеек с заливкой класс .need-level-* применяется НЕ сразу, а только ПОСЛЕ
+   того как отыграет вспышка (className на время анимации становится пустым,
+   поэтому background-color в @keyframes ничем не перебивается и вспышка
+   полностью видна), и только по ее завершении применяется цвет заливки —
+   визуально ровно "сначала мигнули красным, потом залилось цветом".
 */
-
-/* Мягкая вспышка в таблицах*/
-@keyframes cellValueFlash {{
-    0%   {{ box-shadow: 0 0 0 0 rgba(220, 38, 38, 0.55); background-color: rgba(220, 38, 38, 0.20); }}
-    60%  {{ box-shadow: 0 0 0 14px rgba(220, 38, 38, 0); background-color: rgba(220, 38, 38, 0.06); }}
-    100% {{ box-shadow: 0 0 0 14px rgba(220, 38, 38, 0); background-color: transparent; }}
-}}
-td.value-flash {{
-    animation: cellValueFlash 0.9s ease-out;
-    position: relative;
-    z-index: 1;
-}}
-
-/* Яркая вспышка в таблицах*/
 @keyframes cellValueFlash {{
     0%   {{ box-shadow: 0 0 0 0 rgba(255, 0, 0, 0.85); background-color: rgba(255, 0, 0, 0.45); }}
     60%  {{ box-shadow: 0 0 0 16px rgba(255, 0, 0, 0); background-color: rgba(255, 0, 0, 0.10); }}
@@ -1453,7 +1559,7 @@ function getColumnIndexByName(table, colName) {
 // пользователя (triggeredByUserClick === true); фоновые подстраховочные
 // пересчеты по таймеру по-прежнему тихо досчитывают правильное число, но
 // без визуального эффекта.
-function recalcDistrictToggleTotals(triggeredByUserClick) {
+function recalcDistrictToggleTotals(triggeredByUserClick, changedColName, changedNewState) {
     const npTable = parentDoc.getElementById("npTable");
     const districtTable = parentDoc.getElementById("districtTable");
     if (!npTable || !districtTable) return;
@@ -1496,10 +1602,119 @@ function recalcDistrictToggleTotals(triggeredByUserClick) {
         }
     });
 
-    // После пересчета счетчиков "да" пересчитываем агрегированные показатели
-    // по всей строке района (см. recalcDistrictRowAffordabilityAggregates
-    // ниже по файлу) — п.1-п.6 из отдельного задания на эту функцию.
-    recalcDistrictRowAffordabilityAggregates(npTable, districtTable, districtRow, triggeredByUserClick);
+    // Строка района (см. цикл выше) пересчитывается "с нуля" — полным
+    // подсчетом "да" по видимым в npTable строкам, это корректно и
+    // безопасно для повторных (в т.ч. фоновых) вызовов. Для строки ОБЛАСТИ
+    // так сделать нельзя: в браузере нет данных по населенным пунктам
+    // ОСТАЛЬНЫХ районов области, поэтому ее счетчики можно только точечно
+    // поправить на +1/-1 относительно того единственного тумблера, который
+    // реально был переключен в этом клике (см. adjustOblastToggleCount).
+    // Отсюда и обязательное условие: только если это настоящий клик
+    // (triggeredByUserClick) и известны colName/newState этого клика — на
+    // фоновых подстраховочных вызовах (colName не передан) ничего не трогаем,
+    // иначе счетчик области задваивался/расходился бы на каждый тик таймера.
+    if (triggeredByUserClick && changedColName && TOGGLE_YES_NO_COLUMNS.includes(changedColName)) {
+        adjustOblastToggleCount(districtTable, changedColName, changedNewState);
+    }
+
+    // ==========================================================
+    // ОПТИМАЛЬНЫЙ АЛГОРИТМ РАСЧЕТА (см. пояснение по всему проекту
+    // ниже, в комментариях к computeNpTableAffordabilitySums и
+    // recalcOblastRowAffordabilityAggregates): npTable текущего района
+    // перебирается ОДИН РАЗ за клик (а не по разу на district-строку и
+    // на область-строку по отдельности) — результат (суммы/счетчики)
+    // переиспользуется в обеих функциях ниже.
+    // ==========================================================
+    const npLevelColIdx = getColumnIndexByName(npTable, "Уровень финансовой доступности");
+    const npNeedChangeColIdx = getColumnIndexByName(npTable, "Изменение уровня потребности в развитии дистанционного банковского обслуживания за счет альтернативной инфраструктуры, п.п.");
+    const npSums = (npLevelColIdx !== -1 && npNeedChangeColIdx !== -1)
+        ? computeNpTableAffordabilitySums(npTable, npLevelColIdx, npNeedChangeColIdx)
+        : null;
+
+    // Пересчитываем агрегированные показатели строки района (последняя
+    // строка в теле districtTable) — п.1-п.6 из задания на districtRow.
+    recalcDistrictRowAffordabilityAggregates(districtTable, districtRow, npSums, triggeredByUserClick);
+
+    // Пересчитываем агрегированные показатели строки области (первая
+    // строка в теле districtTable, если она есть) — п.1-п.6 из отдельного
+    // задания на oblastRow, с учетом населенных пунктов ВНЕ текущего района.
+    recalcOblastRowAffordabilityAggregates(districtTable, npSums, triggeredByUserClick);
+}
+
+// =====================================================================
+// ИНКРЕМЕНТ/ДЕКРЕМЕНТ СЧЕТЧИКОВ TOGGLE_YES_NO_COLUMNS В СТРОКЕ ОБЛАСТИ
+// (districtTable, первая строка в теле таблицы)
+// =====================================================================
+// В отличие от строки района (которая при каждом клике пересчитывается
+// заново — полным подсчетом "да" по видимым в npTable строкам, см. цикл в
+// начале recalcDistrictToggleTotals), строку области так пересчитать
+// нельзя: она включает населенные пункты ВСЕХ районов области, а в браузере
+// на странице конкретного района загружены данные только по ЕГО населенным
+// пунктам. Поэтому вместо полного пересчета применяется ТОЧЕЧНАЯ поправка:
+// колонка "Количество точек финансового доступа" / "Количество Финансовых
+// помощников" / "Количество торговых точек с сервисом ..." в строке области
+// увеличивается на 1, если конкретный переключатель в npTable сменился с
+// "нет" на "да", и уменьшается на 1, если сменился с "да" на "нет" —
+// ровно на ту же единицу, которая только что изменилась в строке района.
+// Начальное значение ячейки (до первого клика) — официальный агрегат по
+// всей области из NSO_SUMMARY_FILE (см. nso_row_html в Python), от которого
+// и ведется этот покликовый инкремент/декремент.
+function adjustOblastToggleCount(districtTable, colName, newState) {
+    const distRows = districtTable.tBodies[0] ? districtTable.tBodies[0].rows : null;
+    // Строка области — первая строка, но только если она реально
+    // отрендерена (т.е. есть минимум 2 строки: область + район). Если ее
+    // нет (нет данных NSO_SUMMARY_FILE), поправлять нечего.
+    if (!distRows || distRows.length < 2) return;
+    const oblastRow = distRows[0];
+
+    const colIndex = getColumnIndexByName(districtTable, colName);
+    if (colIndex === -1) return;
+
+    const oblastCell = oblastRow.cells[colIndex];
+    if (!oblastCell) return;
+
+    const currentCount = parseNumericCellValue(oblastCell.textContent);
+    const delta = newState === "yes" ? 1 : -1;
+    const newCount = Math.max(0, currentCount + delta);
+
+    oblastCell.textContent = String(newCount);
+    // triggeredByUserClick сюда специально не пробрасывается отдельным
+    // параметром: adjustOblastToggleCount вызывается ТОЛЬКО из настоящего
+    // клика (см. проверку triggeredByUserClick в recalcDistrictToggleTotals
+    // перед вызовом этой функции), поэтому вспышка нужна всегда.
+    flashCell(oblastCell);
+}
+
+// Перебирает ВСЕ строки npTable ОДИН РАЗ и считает величины, нужные сразу
+// для обоих пересчетов ниже (строка района и строка области):
+//   - levelSum / levelCount — сумма и количество значений "Уровень
+//     финансовой доступности" по ВСЕМ строкам (нули не исключаются);
+//   - needChangeSum / needChangeCount — сумма и количество ТОЛЬКО
+//     ненулевых значений "Изменение уровня потребности...".
+// Вынесено в отдельную функцию, чтобы не перебирать npTable дважды
+// (для districtRow и для oblastRow отдельно) — см. пояснение в шапке
+// recalcOblastRowAffordabilityAggregates про оптимальный алгоритм.
+function computeNpTableAffordabilitySums(npTable, npLevelColIdx, npNeedChangeColIdx) {
+    const npRows = Array.from(npTable.tBodies[0].rows);
+    let levelSum = 0;
+    let needChangeSum = 0;
+    let needChangeCount = 0;
+
+    npRows.forEach(row => {
+        const levelCell = row.cells[npLevelColIdx];
+        if (levelCell) levelSum += parseNumericCellValue(levelCell.textContent);
+
+        const needChangeCell = row.cells[npNeedChangeColIdx];
+        if (needChangeCell) {
+            const val = parseNumericCellValue(needChangeCell.textContent);
+            if (val !== 0) {
+                needChangeSum += val;
+                needChangeCount += 1;
+            }
+        }
+    });
+
+    return { levelSum, levelCount: npRows.length, needChangeSum, needChangeCount };
 }
 
 // =====================================================================
@@ -1537,52 +1752,33 @@ function recalcDistrictToggleTotals(triggeredByUserClick) {
 // минусе, без стрелки при нуле) не меняется — используются те же функции
 // setLevelCellValue/setChangeCellValue, что и для строк населенных пунктов.
 //
+// npSums — уже посчитанные суммы по npTable (см. computeNpTableAffordabilitySums),
+// передаются извне, чтобы не перебирать таблицу дважды.
 // triggeredByUserClick прокидывается из recalcDistrictToggleTotals и
 // определяет, нужна ли визуальная "вспышка" при обновлении ячеек (см.
 // пояснение в recalcDistrictToggleTotals про фоновые подстраховочные
 // пересчеты по таймеру, которые не должны мигать вспышкой на загрузке
 // страницы).
-function recalcDistrictRowAffordabilityAggregates(npTable, districtTable, districtRow, triggeredByUserClick) {
+function recalcDistrictRowAffordabilityAggregates(districtTable, districtRow, npSums, triggeredByUserClick) {
+    if (!npSums || npSums.levelCount === 0) return;
+
     const districtCells = getAffordabilityCells(districtTable, districtRow);
     if (!districtCells) return;
     const { levelCell, levelChangeCell, needCell, needChangeCell } = districtCells;
-
-    const npLevelColIdx = getColumnIndexByName(npTable, "Уровень финансовой доступности");
-    const npNeedChangeColIdx = getColumnIndexByName(npTable, "Изменение уровня потребности в развитии дистанционного банковского обслуживания за счет альтернативной инфраструктуры, п.п.");
-    if (npLevelColIdx === -1 || npNeedChangeColIdx === -1) return;
-
-    const npRows = Array.from(npTable.tBodies[0].rows);
-    if (npRows.length === 0) return;
 
     // --- п.1: "Уровень финансовой доступности Старый" (значение до пересчета) ---
     const oldLevel = parseNumericCellValue(levelCell.textContent);
 
     // --- п.2: среднее НЕНУЛЕВЫХ значений "Изменение уровня потребности..."
     // по всем населенным пунктам района (округление до 1 знака) ---
-    let needChangeSum = 0;
-    let needChangeCount = 0;
-    npRows.forEach(row => {
-        const cell = row.cells[npNeedChangeColIdx];
-        if (!cell) return;
-        const val = parseNumericCellValue(cell.textContent);
-        if (val !== 0) {
-            needChangeSum += val;
-            needChangeCount += 1;
-        }
-    });
-    const needChangeAvg = needChangeCount > 0
-        ? Math.round((needChangeSum / needChangeCount) * 10) / 10
+    const needChangeAvg = npSums.needChangeCount > 0
+        ? Math.round((npSums.needChangeSum / npSums.needChangeCount) * 10) / 10
         : 0;
 
     // --- п.3: среднее арифметическое "Уровня финансовой доступности" по
     // ВСЕМ населенным пунктам района (нулевые значения здесь НЕ исключаются,
     // в отличие от п.2 — так задано в требованиях) ---
-    let levelSum = 0;
-    npRows.forEach(row => {
-        const cell = row.cells[npLevelColIdx];
-        if (cell) levelSum += parseNumericCellValue(cell.textContent);
-    });
-    const newLevel = Math.round((levelSum / npRows.length) * 10) / 10;
+    const newLevel = Math.round((npSums.levelSum / npSums.levelCount) * 10) / 10;
 
     // --- п.4: "Уровень потребности..." = 100% - Уровень + Изменение уровня
     // потребности (обратите внимание на знак "+", см. пояснение в шапке
@@ -1609,12 +1805,125 @@ function recalcDistrictRowAffordabilityAggregates(npTable, districtTable, distri
     const prevLevelChange = parseNumericCellValue(levelChangeCell.textContent);
     setChangeCellValue(levelChangeCell, prevLevelChange + levelGain, shouldFlash);
 
-    // --- Обновляем "Уровень потребности в развитии ДБО..." ---
-    setLevelCellValue(needCell, needLevel, shouldFlash);
+    // --- Обновляем "Уровень потребности в развитии ДБО..." (строка района).
+    // applyNeedLevelFill = true — ДОБАВЛЕНО по отдельному заданию: заливаем
+    // фон ячейки цветом по порогам get_need_level_class/getNeedLevelClassJS
+    // (см. пояснение к параметру в setLevelCellValue выше). ---
+    setLevelCellValue(needCell, needLevel, shouldFlash, true);
 
     // --- Обновляем "Изменение уровня потребности..." значением, посчитанным в п.2 ---
     setChangeCellValue(needChangeCell, needChangeAvg, shouldFlash);
 }
+
+// =====================================================================
+// ПЕРЕСЧЕТ АГРЕГИРОВАННЫХ ПОКАЗАТЕЛЕЙ СТРОКИ ОБЛАСТИ (districtTable, ПЕРВАЯ
+// строка в теле таблицы — "Новосибирская область")
+// =====================================================================
+// Формулы полностью аналогичны recalcDistrictRowAffordabilityAggregates
+// (п.1-п.6 в том же порядке), но считаются не по населенным пунктам ОДНОГО
+// района, а по ВСЕМ населенным пунктам области — т.е. по всему файлу
+// NP_FILE = DB{date}_NP.xlsx, с одной важной оговоркой из задания:
+// для населенных пунктов ТЕКУЩЕГО (открытого) района нужно брать актуальные
+// (пересчитанные с учетом действий пользователя) значения из npTable, а не
+// исходные значения из файла.
+//
+// >>> ОПТИМАЛЬНЫЙ АЛГОРИТМ (обоснование выбора) <<<
+// Файл NP_FILE может содержать тысячи населенных пунктов по всей области.
+// Пересчитывать сумму/среднее по ВСЕМ ним заново при КАЖДОМ клике
+// пользователя (а кликов может быть много подряд) — плохая идея: это O(N)
+// тяжелых операций (парсинг чисел из тысяч ячеек) на каждый клик, тогда как
+// реально от клика меняются данные только по населенным пунктам ТЕКУЩЕГО
+// района (их обычно от единиц до нескольких десятков).
+// Поэтому расчет разбит на две части:
+//   1) "Остальная область" (все населенные пункты ВНЕ текущего района) —
+//      их значения в файле НЕ меняются действиями пользователя на этой
+//      странице, поэтому суммы/счетчики по ним считаются ОДИН РАЗ в Python
+//      при загрузке страницы, с кэшированием через st.cache_data (см.
+//      compute_other_districts_affordability_aggregates в начале файла), и
+//      передаются в браузер один раз через
+//      window.parent.__oblastOtherAggregates (JSON, установленный отдельным
+//      components.html-скриптом непосредственно на странице района).
+//   2) "Текущий район" — его населенные пункты как раз меняются кликами,
+//      поэтому их сумма пересчитывается в браузере при каждом клике, но
+//      ОДНИМ проходом по строкам npTable (computeNpTableAffordabilitySums,
+//      вызывается один раз в recalcDistrictToggleTotals и передается сюда
+//      через параметр npSums — код ниже НЕ перебирает npTable повторно).
+// Итоговое среднее по всей области получается простым объединением двух
+// частичных сумм: (сумма_вне_района + сумма_района) / (кол-во_вне_района +
+// кол-во_района). Стоимость пересчета на каждый клик — O(размер текущего
+// района), а не O(размер всей области), независимо от того, сколько всего
+// населенных пунктов в NP_FILE.
+function recalcOblastRowAffordabilityAggregates(districtTable, npSums, triggeredByUserClick) {
+    if (!npSums) return;
+
+    const distRows = districtTable.tBodies[0] ? districtTable.tBodies[0].rows : null;
+    // Строка области — первая строка в теле districtTable, но только если
+    // она реально есть (т.е. строк минимум 2: область + район). Если строка
+    // области не была отрендерена (например, нет данных NSO_SUMMARY_FILE),
+    // districtTable.tBodies[0].rows[0] был бы строкой РАЙОНА — пересчитывать
+    // ее по формулам области было бы ошибкой, поэтому в этом случае просто
+    // ничего не делаем.
+    if (!distRows || distRows.length < 2) return;
+    const oblastRow = distRows[0];
+
+    const oblastCells = getAffordabilityCells(districtTable, oblastRow);
+    if (!oblastCells) return;
+    const { levelCell, levelChangeCell, needCell, needChangeCell } = oblastCells;
+
+    // Кэшированные (посчитанные в Python при загрузке страницы) суммы по
+    // населенным пунктам ВНЕ текущего района. Если по какой-то причине их
+    // нет (страница открыта не через штатный маршрут, скрипт не успел
+    // отработать и т.п.) — считаем область "равной" текущему району, чтобы
+    // не сломать расчет полностью.
+    const rawOther = window.parent.__oblastOtherAggregates;
+    const other = (rawOther && typeof rawOther === "object")
+        ? rawOther
+        : { otherLevelSum: 0, otherLevelCount: 0, otherNeedChangeSum: 0, otherNeedChangeCount: 0 };
+
+    // --- п.1: "Уровень финансовой доступности Старый" ---
+    const oldLevel = parseNumericCellValue(levelCell.textContent);
+
+    // --- п.3: "Уровень финансовой доступности" по ВСЕЙ области = среднее
+    // (сумма вне района + сумма по району) / (кол-во вне района + кол-во по району) ---
+    const totalLevelSum = other.otherLevelSum + npSums.levelSum;
+    const totalLevelCount = other.otherLevelCount + npSums.levelCount;
+    const newLevel = totalLevelCount > 0
+        ? Math.round((totalLevelSum / totalLevelCount) * 10) / 10
+        : oldLevel;
+
+    // --- п.2: "Изменение уровня потребности..." по ВСЕЙ области = среднее
+    // ненулевых значений (вне района + по району) ---
+    const totalNeedChangeSum = other.otherNeedChangeSum + npSums.needChangeSum;
+    const totalNeedChangeCount = other.otherNeedChangeCount + npSums.needChangeCount;
+    const needChangeAvg = totalNeedChangeCount > 0
+        ? Math.round((totalNeedChangeSum / totalNeedChangeCount) * 10) / 10
+        : 0;
+
+    // --- п.4: "Уровень потребности..." = 100% - Уровень + Изменение уровня потребности ---
+    const needLevel = Math.max(0, 100 - newLevel + needChangeAvg);
+
+    // --- п.5: "Прирост финансовой доступности" ---
+    const levelGain = newLevel - oldLevel;
+
+    const shouldFlash = !!triggeredByUserClick;
+
+    // --- Обновляем "Уровень финансовой доступности" строки области ---
+    setLevelCellValue(levelCell, newLevel, shouldFlash);
+
+    // --- п.6: накопительно, += Прирост ---
+    const prevLevelChange = parseNumericCellValue(levelChangeCell.textContent);
+    setChangeCellValue(levelChangeCell, prevLevelChange + levelGain, shouldFlash);
+
+    // --- Обновляем "Уровень потребности в развитии ДБО..." (строка области).
+    // applyNeedLevelFill = true — ДОБАВЛЕНО по отдельному заданию: заливаем
+    // фон ячейки цветом по порогам get_need_level_class/getNeedLevelClassJS
+    // (см. пояснение к параметру в setLevelCellValue выше). ---
+    setLevelCellValue(needCell, needLevel, shouldFlash, true);
+
+    // --- Обновляем "Изменение уровня потребности..." значением из п.2 ---
+    setChangeCellValue(needChangeCell, needChangeAvg, shouldFlash);
+}
+
 
 // =====================================================================
 // ПРОГНОЗНЫЙ ПЕРЕСЧЕТ УРОВНЯ ФИН. ДОСТУПНОСТИ И ПОТРЕБНОСТИ В ДБО (npTable)
@@ -1678,6 +1987,13 @@ function parseNumericCellValue(text) {
     return match ? parseFloat(match[0]) : 0;
 }
 
+// Длительность CSS-анимации вспышки в миллисекундах — ДОЛЖНА совпадать с
+// "1.0s" в правиле "animation: cellValueFlash 1.0s ease-out;" (см. CSS выше
+// по файлу). Используется в setLevelCellValue, чтобы отложенно применить
+// заливку .need-level-* ровно к моменту завершения вспышки (см. пояснение
+// там же).
+const VALUE_FLASH_DURATION_MS = 1000;
+
 // Короткая цветовая "вспышка" на ячейке (см. @keyframes cellValueFlash в CSS
 // выше по файлу) — чтобы пересчитанное значение было заметно визуально, а не
 // только "тихо" менялось в тексте. Класс сначала снимается, затем (после
@@ -1691,10 +2007,27 @@ function flashCell(cell) {
     cell.classList.add("value-flash");
 }
 
+// JS-аналог Python-функции get_need_level_class(col_name, num_val) (см. ее
+// определение в начале файла) — используется ТОЛЬКО для ячейки "Уровень
+// потребности в развитии дистанционного банковского обслуживания с учетом
+// альтернативной инфраструктуры" в строках области/района districtTable
+// (по отдельному заданию), поэтому параметр col_name здесь не нужен: эта
+// функция вызывается лишь там, где заливка точно требуется. Пороги и
+// названия классов — 1-в-1 как в Python-версии и как в CSS-правилах
+// .need-level-0-10 / .need-level-11-15 / .need-level-16-20 /
+// .need-level-21-30 / .need-level-31-100 (см. блок "3. СТИЛИ ТАБЛИЦ" выше).
+function getNeedLevelClassJS(numVal) {
+    const rounded = Math.round(numVal * 100) / 100; // округление до 2 знаков, как Python round(num_val, 2)
+    if (rounded >= 0 && rounded < 11) return "need-level-0-10";
+    if (rounded >= 11 && rounded < 16) return "need-level-11-15";
+    if (rounded >= 16 && rounded < 21) return "need-level-16-20";
+    if (rounded >= 21 && rounded < 31) return "need-level-21-30";
+    if (rounded >= 31) return "need-level-31-100";
+    return ""; // теоретически недостижимо для num_val >= 0, оставлено для защиты от отрицательных значений
+}
+
 // Записывает новое значение в проценто-ячейку без стрелки: "Уровень
 // финансовой доступности" / "Уровень потребности в развитии ДБО ...".
-// Класс всегда пустой — как и при первичном рендере этих колонок в Python
-// (get_need_level_class возвращает "" для обеих, см. функцию в начале файла).
 // shouldFlash (по умолчанию true) — запускать ли визуальную "вспышку"
 // (flashCell). По умолчанию true, т.к. существующие вызовы этой функции
 // (из applyAffordabilityForecastForRow / revertAffordabilityForecastForRow)
@@ -1702,11 +2035,46 @@ function flashCell(cell) {
 // добавлен для recalcDistrictRowAffordabilityAggregates, которая вызывается
 // в том числе из фоновых подстраховочных пересчетов по таймеру — там
 // вспышка должна быть отключена (см. пояснение в recalcDistrictToggleTotals).
-function setLevelCellValue(cell, numVal, shouldFlash = true) {
+// applyNeedLevelFill (по умолчанию false) — ДОБАВЛЕНО по отдельному заданию:
+// если true, класс ячейки вычисляется через getNeedLevelClassJS(numVal)
+// (заливка фона по тем же порогам, что и в Python get_need_level_class),
+// иначе класс всегда пустой — как и раньше, и как при первичном рендере
+// этой же колонки в npTable (там get_need_level_class всегда возвращает ""
+// для этого column-имени, заливка нужна только в districtTable по строкам
+// области/района — см. вызовы этой функции с applyNeedLevelFill=true в
+// recalcDistrictRowAffordabilityAggregates/recalcOblastRowAffordabilityAggregates).
+// ВАЖНО: анимация вспышки (@keyframes cellValueFlash) висит прямо на фоне
+// td.value-flash, поэтому конкурировать с !important-заливкой .need-level-*
+// напрямую (той же самой анимацией) бессмысленно — !important внутри
+// @keyframes браузеры по спецификации CSS игнорируют, а обычная (без
+// !important) анимация background-color в любом случае имеет более низкий
+// приоритет в каскаде, чем !important-правило .need-level-*.
+// Решение — ОЧЕРЕДНОСТЬ, а не слои: если applyNeedLevelFill=true и вспышка
+// нужна (shouldFlash=true), заливка временно НЕ применяется — className на
+// время анимации остается пустым, поэтому анимация background-color ничем
+// не перебивается и полностью видна, — а класс .need-level-* навешивается
+// уже ПОСЛЕ того как вспышка отыграла (через setTimeout на
+// VALUE_FLASH_DURATION_MS, синхронизированный с длительностью CSS-анимации).
+// Визуально получается ровно "сначала мигнули красным, потом залилось
+// цветом". Если вспышка не нужна (shouldFlash=false — например, фоновый
+// подстраховочный пересчет по таймеру) или заливка не нужна вовсе —
+// класс применяется сразу, без всякой отсрочки.
+function setLevelCellValue(cell, numVal, shouldFlash = true, applyNeedLevelFill = false) {
     if (!cell) return;
-    cell.className = "";
     cell.textContent = numVal.toFixed(1) + "%";
-    if (shouldFlash) flashCell(cell);
+
+    const needLevelClass = applyNeedLevelFill ? getNeedLevelClassJS(numVal) : "";
+
+    if (applyNeedLevelFill && shouldFlash) {
+        cell.className = ""; // на время вспышки заливки быть не должно
+        flashCell(cell);
+        setTimeout(() => {
+            cell.className = needLevelClass;
+        }, VALUE_FLASH_DURATION_MS);
+    } else {
+        cell.className = needLevelClass;
+        if (shouldFlash) flashCell(cell);
+    }
 }
 
 // Записывает новое значение в ячейку "Изменение уровня ..., п.п." с той же
@@ -1933,21 +2301,26 @@ function initNpToggles() {
             if (valueSpan) valueSpan.textContent = newState === "yes" ? "да" : "нет";
 
             // Определяем имя колонки этой ячейки (по data-colname заголовка
-            // на том же индексе), чтобы применить прогнозный пересчет
-            // "Уровня финансовой доступности" и связанных полей для этой
-            // строки — как при включении ("нет" -> "да", начисление,
-            // applyAffordabilityForecastForRow), так и при выключении
-            // ("да" -> "нет", симметричный откат,
-            // revertAffordabilityForecastForRow). Направление определяет
-            // диспетчер syncAffordabilityForecastForRow (см. выше по файлу).
+            // на том же индексе) — используется и для прогнозного пересчета
+            // "Уровня финансовой доступности" (см. ниже), и для инкремента/
+            // декремента счетчика строки области (см. recalcDistrictToggleTotals
+            // -> adjustOblastToggleCount).
             const npTable = cell.closest("table#npTable");
             const row = cell.closest("tr");
+            let colName = null;
             if (npTable && row) {
                 const colIndex = Array.from(row.cells).indexOf(cell);
                 const headerCell = npTable.tHead && npTable.tHead.rows[0]
                     ? npTable.tHead.rows[0].cells[colIndex]
                     : null;
-                const colName = headerCell ? headerCell.dataset.colname : null;
+                colName = headerCell ? headerCell.dataset.colname : null;
+
+                // Прогнозный пересчет "Уровня финансовой доступности" и
+                // связанных полей для этой строки — как при включении
+                // ("нет" -> "да", начисление, applyAffordabilityForecastForRow),
+                // так и при выключении ("да" -> "нет", симметричный откат,
+                // revertAffordabilityForecastForRow). Направление определяет
+                // диспетчер syncAffordabilityForecastForRow (см. выше по файлу).
                 if (colName && TOGGLE_YES_NO_COLUMNS.includes(colName)) {
                     syncAffordabilityForecastForRow(npTable, row, colName, newState);
                 }
@@ -1956,7 +2329,14 @@ function initNpToggles() {
             // triggeredByUserClick = true — это настоящий клик пользователя,
             // поэтому изменившиеся ячейки districtTable подсвечиваются
             // вспышкой (см. пояснение к параметру в recalcDistrictToggleTotals).
-            recalcDistrictToggleTotals(true);
+            // colName/newState передаются дополнительно, чтобы
+            // recalcDistrictToggleTotals могла инкрементировать/декрементировать
+            // счетчик именно этой колонки в строке области (см.
+            // adjustOblastToggleCount) — в отличие от строки района, для
+            // строки области это не пересчет "с нуля", а точечная поправка
+            // на +1/-1 относительно исходного значения, т.к. живых данных по
+            // остальным районам области в браузере нет.
+            recalcDistrictToggleTotals(true, colName, newState);
         }
     });
 }
@@ -2156,6 +2536,20 @@ function makeSortable(tableId) {
                 let n2 = parseFloat(v2.replace(",", "."));
                 if (!isNaN(n1) && !isNaN(n2)) return asc ? n1 - n2 : n2 - n1;
                 return asc ? v1.localeCompare(v2, 'ru') : v2.localeCompare(v1, 'ru');
+            });
+            // ИСПРАВЛЕНИЕ ГЛЮКА: сортировка сама по себе не должна вызывать
+            // никакой вспышки и никакого пересчета значений — это просто
+            // смена порядка строк. Но физическое перемещение строки в DOM
+            // (tbody.appendChild(row) чуть ниже) браузер трактует как "узел
+            // удалили и вставили заново", из-за чего CSS-анимация
+            // @keyframes cellValueFlash ПЕРЕЗАПУСКАЕТСЯ на любой ячейке, у
+            // которой класс .value-flash остался с предыдущего пересчета
+            // (сам класс не снимается автоматически после того как анимация
+            // доиграла до конца — см. flashCell). Поэтому перед перемещением
+            // строк снимаем этот класс со всех ячеек таблицы, чтобы
+            // reparenting ничего не "перезапускал".
+            Array.from(table.querySelectorAll(".value-flash")).forEach(el => {
+                el.classList.remove("value-flash");
             });
             rows.forEach(row => tbody.appendChild(row));
             headers.forEach(h => {
@@ -2671,6 +3065,19 @@ elif st.session_state.page == 'district':
                     df_np_region = df_np_region.sort_values("Населенный пункт").reset_index(drop=True)
 
             b64_np_excel = convert_df_to_excel_b64(df_np_region, sheet_name='Населенные пункты') if not df_np_region.empty else ""
+
+            # --- Агрегаты по населенным пунктам ВНЕ текущего района (для
+            # пересчета строки "Новосибирская область" в districtTable) ---
+            # Считаются один раз при загрузке страницы (с кэшированием через
+            # st.cache_data внутри compute_other_districts_affordability_aggregates)
+            # и передаются в браузер JS-скриптом ниже. Подробное обоснование
+            # этого подхода — см. комментарии к recalcOblastRowAffordabilityAggregates
+            # в sorting_script (блок "8. JS СКРИПТ ДЛЯ СОРТИРОВКИ ТАБЛИЦ").
+            oblast_other_aggregates = compute_other_districts_affordability_aggregates(NP_FILE, region_name)
+            components.html(
+                f"<script>window.parent.__oblastOtherAggregates = {json.dumps(oblast_other_aggregates)};</script>",
+                height=0,
+            )
 
             # -----------------------------------------------------------------
             # Макет строки под кнопкой "Возврат на предыдущую страницу":
