@@ -1811,10 +1811,8 @@ function recalcDistrictRowAffordabilityAggregates(districtTable, districtRow, np
     // (см. пояснение к параметру в setLevelCellValue выше). ---
     setLevelCellValue(needCell, needLevel, shouldFlash, true);
 
-    // --- Обновляем "Изменение уровня потребности..." значением, посчитанным
-    // в п.2. invertColors=true — см. пояснение к параметру в
-    // setChangeCellValue выше (для этой колонки цвет "перевернут"). ---
-    setChangeCellValue(needChangeCell, needChangeAvg, shouldFlash, true);
+    // --- Обновляем "Изменение уровня потребности..." значением, посчитанным в п.2 ---
+    setChangeCellValue(needChangeCell, needChangeAvg, shouldFlash);
 }
 
 // =====================================================================
@@ -1922,9 +1920,8 @@ function recalcOblastRowAffordabilityAggregates(districtTable, npSums, triggered
     // (см. пояснение к параметру в setLevelCellValue выше). ---
     setLevelCellValue(needCell, needLevel, shouldFlash, true);
 
-    // --- Обновляем "Изменение уровня потребности..." значением из п.2.
-    // invertColors=true — см. пояснение к параметру в setChangeCellValue. ---
-    setChangeCellValue(needChangeCell, needChangeAvg, shouldFlash, true);
+    // --- Обновляем "Изменение уровня потребности..." значением из п.2 ---
+    setChangeCellValue(needChangeCell, needChangeAvg, shouldFlash);
 }
 
 
@@ -2086,29 +2083,18 @@ function setLevelCellValue(cell, numVal, shouldFlash = true, applyNeedLevelFill 
 // файлу): положительное — зеленым со стрелкой вверх, отрицательное —
 // красным со стрелкой вниз, ноль — без стрелки и без особого цвета.
 // shouldFlash — см. пояснение к этому же параметру в setLevelCellValue выше.
-// invertColors (по умолчанию false) — ДОБАВЛЕНО по отдельному заданию: для
-// колонки "Изменение уровня потребности в развитии ДБО за счет
-// альтернативной инфраструктуры, п.п." (и ТОЛЬКО для нее) применяется
-// "перевернутая" логика цвета относительно обычной: положительное значение
-// (рост потребности в ДБО — это ухудшение ситуации, требуется больше
-// дистанционного обслуживания из-за нехватки физической инфраструктуры) —
-// стрелка вверх, но КРАСНЫМ шрифтом; отрицательное значение (снижение
-// потребности — улучшение) — стрелка вниз, но ЗЕЛЕНЫМ шрифтом. Стрелка
-// по-прежнему показывает направление изменения самого числа, меняется
-// только цвет. Для всех остальных колонок ("Изменение уровня финансовой
-// доступности...") эта логика не применяется — invertColors там всегда false.
-function setChangeCellValue(cell, numVal, shouldFlash = true, invertColors = false) {
+function setChangeCellValue(cell, numVal, shouldFlash = true) {
     if (!cell) return;
     const rounded = Math.round(numVal * 10) / 10; // округление до 1 знака, как python ":.1f"
     let cssClass = "";
     let arrow = "";
     let formatted = "0.0";
     if (rounded > 0) {
-        cssClass = invertColors ? "change-neg-custom" : "change-pos-custom";
+        cssClass = "change-pos-custom";
         arrow = "&#11014;";
         formatted = "+" + rounded.toFixed(1);
     } else if (rounded < 0) {
-        cssClass = invertColors ? "change-pos-custom" : "change-neg-custom";
+        cssClass = "change-neg-custom";
         arrow = "&#11015;";
         formatted = rounded.toFixed(1);
     }
@@ -2154,178 +2140,87 @@ function setAffordabilityAppliedState(row, state) {
     row.dataset.affordabilityApplied = JSON.stringify(state);
 }
 
-// =====================================================================
-// ЗАЛИВКА "УРОВНЯ ПОТРЕБНОСТИ..." ЦВЕТОМ ДЛЯ КАЖДОЙ СТРОКИ npTable (п.2)
-// =====================================================================
-// Ранее заливка по порогам get_need_level_class/getNeedLevelClassJS была
-// реализована только для districtTable (строки области и района) — она
-// применялась через setLevelCellValue(..., applyNeedLevelFill=true) внутри
-// recalcOblastRowAffordabilityAggregates/recalcDistrictRowAffordabilityAggregates,
-// которые запускаются регулярно по таймеру, поэтому заливка districtTable
-// была видна уже "при первичном показе" страницы.
-// Для npTable такого регулярного пересчета КАЖДОЙ строки нет (там пересчет
-// затрагивает только ОДНУ строку — ту, где кликнули, через
-// applyAffordabilityForecastForRow/revertAffordabilityForecastForRow), а
-// значит без отдельного шага заливка при первом показе страницы (до первого
-// клика) не появилась бы вообще. Поэтому эта функция:
-//   - вызывается из общего setInterval (см. в самом низу файла) на КАЖДОМ
-//     тике — то есть в том числе и на самом первом, сразу после загрузки
-//     страницы, что и обеспечивает заливку "при первичном показе";
-//   - НЕ вызывает flashCell — эта функция ничего не пересчитывает и не
-//     меняет число в ячейке, а только приводит класс (=цвет фона) в
-//     соответствие с уже отображенным значением, поэтому вспышка здесь не
-//     нужна (аналогично тому, как фоновые тики recalcDistrictToggleTotals(false)
-//     не мигают вспышкой — см. пояснение там же);
-//   - идемпотентна: если класс уже правильный, ничего не трогает (перезапись
-//     одного и того же className не создает лишней перерисовки).
-// Реальный "пересчет со вспышкой" для этой же ячейки при клике пользователя
-// по-прежнему делают applyAffordabilityForecastForRow/revertAffordabilityForecastForRow
-// (см. applyNeedLevelFill=true в их вызовах setLevelCellValue ниже) — эта
-// функция лишь подстраховывает все ОСТАЛЬНЫЕ строки/исходное состояние.
-function fillNpTableNeedLevelCells(npTable) {
-    if (!npTable || !npTable.tBodies[0]) return;
-    Array.from(npTable.tBodies[0].rows).forEach(row => {
-        const cells = getAffordabilityCells(npTable, row);
-        if (!cells) return;
-        const numVal = parseNumericCellValue(cells.needCell.textContent);
-        const newClass = getNeedLevelClassJS(numVal);
-        if (cells.needCell.className !== newClass) {
-            cells.needCell.className = newClass;
-        }
-    });
-}
-
-// Основной пересчет (п.0–п.7 исходного задания на эту функцию) для ОДНОЙ
-// строки npTable. Раньше вызывался только при переключении "нет" -> "да" —
-// ПО ОТДЕЛЬНОМУ ЗАДАНИЮ (п.3, "работа программы при нажатии кнопок 'нет'")
-// теперь умеет применять эффект в ОБЕ стороны:
-//   - "нет" -> "да" (если по этой колонке в этой строке сейчас нет активной
-//     корректировки) — начисление, ровно как раньше (уровень +5%/+18.5%,
-//     бонус по таблице диапазонов);
-//   - "да" -> "нет" (если по этой колонке сейчас тоже нет активной
-//     корректировки — то есть исходное состояние "да" пришло из данных, а
-//     не было включено пользователем в этой сессии) — СИММЕТРИЧНОЕ списание:
-//     та же величина, но с обратным знаком (уровень -5%/-18.5%, бонус со
-//     знаком минус), потому что пользователь "убирает" уже существующую
-//     инфраструктуру, а не отменяет свое же более раннее включение.
-// Выбор между "начислить" и "откатить ранее начисленное" делает диспетчер
-// syncAffordabilityForecastForRow (см. ниже) — эта функция вызывается ТОЛЬКО
-// когда по этой колонке в этой строке журнал пуст, т.е. это точно НОВАЯ
-// (а не отменяющая) корректировка. Направление (+/-) определяется параметром
-// newState.
-// Для отмены уже примененной этой функцией корректировки (в любую сторону)
-// отвечает отдельная функция revertAffordabilityForecastForRow сразу ниже —
-// она работает с сохраненными в "журнале" величинами и не пересчитывает
-// формулы заново, поэтому одинаково корректно откатывает что начисление,
-// что списание (знак levelGain/bonusGain сохраняется как есть).
-function applyAffordabilityForecastForRow(npTable, row, colName, newState) {
+// Основной пересчет (п.0–п.7 задания) для ОДНОЙ строки npTable — вызывается
+// из initNpToggles сразу после того, как пользователь переключил "нет" -> "да"
+// в одной из колонок TOGGLE_YES_NO_COLUMNS для этого населенного пункта.
+// За откат обратного переключения ("да" -> "нет") отвечает отдельная функция
+// revertAffordabilityForecastForRow сразу ниже.
+function applyAffordabilityForecastForRow(npTable, row, colName) {
     const cells = getAffordabilityCells(npTable, row);
     if (!cells) return;
     const { levelCell, levelChangeCell, needCell, needChangeCell } = cells;
 
     // Защита от повторного начисления: если по этой колонке в этой строке
     // эффект уже применен (запись есть в "журнале"), повторно ничего не
-    // начисляем — иначе накопительные поля (п.7) задвоились бы. В обычной
-    // работе сюда и не должны попасть в этом случае — диспетчер
-    // syncAffordabilityForecastForRow проверяет это заранее и вызвал бы
-    // вместо этого revertAffordabilityForecastForRow, — проверка оставлена
-    // как защита "на всякий случай".
+    // начисляем — иначе накопительные поля (п.7) задвоились бы.
     const appliedState = getAffordabilityAppliedState(row);
     if (appliedState[colName]) return;
 
     // --- п.0: "Уровень финансовой доступности Старый" ---
     const oldLevel = parseNumericCellValue(levelCell.textContent);
 
-    // --- п.1, п.2 (и симметрично для п.3 нового задания): прибавка/списание
-    // уровня финансовой доступности. Знак определяется направлением
-    // переключения (newState): "да" — прибавляем (как раньше), "нет" —
-    // ровно то же самое значение, но вычитаем. Math.min(100, ...) не дает
-    // уйти выше 100% при начислении, Math.max(0, ...) — по отдельному
-    // требованию задания ("Уровень финансовой доступности" не может быть
-    // менее 0) не дает уйти в минус при списании. ---
-    const baseDelta = AFFORDABILITY_LEVEL_DELTA[colName] || 0;
-    const signedDelta = newState === "yes" ? baseDelta : -baseDelta;
-    const newLevel = Math.min(100, Math.max(0, oldLevel + signedDelta));
+    // --- п.1, п.2: прибавка к уровню финансовой доступности (не выше 100%) ---
+    const levelDelta = AFFORDABILITY_LEVEL_DELTA[colName] || 0;
+    const newLevel = Math.min(100, oldLevel + levelDelta);
 
-    // --- п.3 исходного задания: "Прирост финансовой доступности" —
-    // фактически примененная величина (может по модулю оказаться меньше
-    // signedDelta, если сработало ограничение 0%/100% — например, уровень
-    // был 3%, списываем 5%, реальный прирост будет -3, а не -5). ---
+    // --- п.3: "Прирост финансовой доступности" ---
     const levelGain = newLevel - oldLevel;
 
-    // --- п.4: "Бонус". Диапазон берем по НОВОМУ уровню (newLevel) — как и
-    // при начислении, так и при списании: это симметрично и не требует
-    // отдельной ветки логики. Знак бонуса совпадает с направлением
-    // переключения — при списании ("нет") бонус тоже вычитается. ---
+    // --- п.4: "Бонус" — накопительный, хранится в data-атрибуте строки
+    // (в самой таблице отдельной колонки для него нет, он используется
+    // только для расчета двух полей "Уровень/Изменение уровня потребности...")
     const bonusRates = getAffordabilityBonusRates(newLevel);
-    let bonusMagnitude = 0;
+    let bonusGain = 0;
     if (colName === "Количество точек финансового доступа") {
-        bonusMagnitude = bonusRates.pointBonus;
+        bonusGain = bonusRates.pointBonus;
     } else if (colName === "Количество финансовых помощников") {
-        bonusMagnitude = bonusRates.helperBonus;
+        bonusGain = bonusRates.helperBonus;
     }
-    const bonusGain = newState === "yes" ? bonusMagnitude : -bonusMagnitude;
 
-    // Запоминаем в "журнале", сколько именно (с учетом знака) было
-    // начислено/списано по этой колонке — это и есть основа для точного
-    // симметричного отката при обратном переключении.
+    // Запоминаем в "журнале", сколько именно было начислено по этой колонке —
+    // ЭТО и есть основа для точного симметричного отката при выключении.
     appliedState[colName] = { levelGain, bonusGain };
     setAffordabilityAppliedState(row, appliedState);
 
-    // Math.max(0, ...) — "Бонус" по смыслу тоже не должен уходить в минус
-    // (в задании явно оговорено только про "Уровень финансовой доступности",
-    // но отрицательный бонус не имеет смысла и мог бы дать некорректный
-    // "Уровень потребности..." выше 100% — тот же защитный принцип).
-    const bonusTotal = Math.max(0, parseFloat(row.dataset.affordabilityBonus || "0") + bonusGain);
+    const bonusTotal = parseFloat(row.dataset.affordabilityBonus || "0") + bonusGain;
     row.dataset.affordabilityBonus = String(bonusTotal);
 
     // --- Обновляем "Уровень финансовой доступности" ---
-    setLevelCellValue(levelCell, newLevel, true);
+    setLevelCellValue(levelCell, newLevel);
 
     // --- п.7: "Изменение уровня фин. доступности к пред. отчетной дате, п.п." (накопительно) ---
     const prevLevelChange = parseNumericCellValue(levelChangeCell.textContent);
-    setChangeCellValue(levelChangeCell, prevLevelChange + levelGain, true);
+    setChangeCellValue(levelChangeCell, prevLevelChange + levelGain);
 
     // --- п.5: "Уровень потребности в развитии ДБО с учетом альт. инфраструктуры" ---
     // Math.max(0, ...) — защитный "пол", в задании не оговорен явно, но
     // предотвращает уход в отрицательные проценты, если Бонус окажется
     // больше остатка (100 - Уровень).
     const needLevel = Math.max(0, 100 - newLevel - bonusTotal);
-    // shouldFlash=true (клик пользователя всегда настоящий для этой функции),
-    // applyNeedLevelFill=true — по отдельному заданию (п.2): та же заливка
-    // по порогам, что уже была реализована для districtTable.
-    setLevelCellValue(needCell, needLevel, true, true);
+    setLevelCellValue(needCell, needLevel);
 
-    // --- п.6: "Изменение уровня потребности ... за счет альт. инфраструктуры, п.п."
-    // invertColors=true — см. пояснение к параметру в setChangeCellValue
-    // (для этой колонки цвет "перевернут" относительно обычной логики). ---
-    setChangeCellValue(needChangeCell, -bonusTotal, true, true);
+    // --- п.6: "Изменение уровня потребности ... за счет альт. инфраструктуры, п.п." ---
+    setChangeCellValue(needChangeCell, -bonusTotal);
 }
 
 // =====================================================================
-// ОТКАТ РАНЕЕ ПРИМЕНЕННОЙ КОРРЕКТИРОВКИ (в любую сторону)
+// ОТКАТ ПРОГНОЗНОГО ПЕРЕСЧЕТА ПРИ ОБРАТНОМ ПЕРЕКЛЮЧЕНИИ ("да" -> "нет")
 // =====================================================================
-// Отдельный, локализованный кусок кода: полностью СИММЕТРИЧНО отменяет
-// эффект, ранее примененный ЭТОЙ ЖЕ колонкой в этой же строке функцией
-// applyAffordabilityForecastForRow выше — вне зависимости от того, было ли
-// это начисление ("нет" -> "да") или списание ("да" -> "нет", по отдельному
-// заданию, см. подробности в шапке applyAffordabilityForecastForRow).
-// Функция ничего не знает и не должна знать о направлении — она просто
-// вычитает СОХРАНЕННУЮ величину (levelGain/bonusGain, с ее собственным
-// знаком) из текущих значений. Если сохранен положительный levelGain
-// (было начисление) — вычитание уменьшает уровень (откат начисления);
-// если сохранен отрицательный levelGain (было списание) — вычитание
-// отрицательного числа увеличивает уровень (откат списания, т.е. возврат
-// списанного). Это и есть смысл "журнала начислений": не пересчитывать
-// формулы заново (это могло бы разойтись с тем, что реально показано на
-// экране — например, из-за ограничения уровня в 0%/100%, которое могло
-// "срезать" фактически примененную величину), а откатывать ровно то, что
-// было применено.
+// Отдельный, локализованный кусок кода (по запросу заказчика): при
+// выключении тумблера в одной из колонок TOGGLE_YES_NO_COLUMNS полностью
+// СИММЕТРИЧНО отменяется эффект, ранее начисленный ЭТОЙ ЖЕ колонкой этой же
+// строке функцией applyAffordabilityForecastForRow выше.
 //
-// Если по этой колонке в этой строке сейчас нет активной корректировки
-// (журнал пуст) — откатывать нечего, функция ничего не делает. Диспетчер
-// syncAffordabilityForecastForRow (см. ниже) в этом случае вызывает не эту
-// функцию, а applyAffordabilityForecastForRow — начало НОВОЙ корректировки.
+// Принцип отката: НЕ пересчитываем формулы заново "с нуля" (это могло бы
+// разойтись с тем, что реально показано на экране — например, из-за
+// ограничения уровня в 100%, которое могло "срезать" фактически начисленный
+// прирост), а вычитаем ровно ту величину (levelGain/bonusGain), которая была
+// сохранена в "журнале начислений" (getAffordabilityAppliedState) в момент
+// включения этой же колонки.
+//
+// Если по этой колонке в этой строке ничего не было начислено (тумблер
+// выключали, ни разу не включив, либо эффект уже был отменен ранее) —
+// откатывать нечего, функция ничего не делает.
 function revertAffordabilityForecastForRow(npTable, row, colName) {
     const appliedState = getAffordabilityAppliedState(row);
     const applied = appliedState[colName];
@@ -2335,60 +2230,46 @@ function revertAffordabilityForecastForRow(npTable, row, colName) {
     if (!cells) return;
     const { levelCell, levelChangeCell, needCell, needChangeCell } = cells;
 
-    // --- Откат уровня (симметрично п.1/п.2, независимо от знака applied.levelGain) ---
+    // --- Откат п.1/п.2: вычитаем ровно тот прирост уровня, что был начислен ---
     const oldLevel = parseNumericCellValue(levelCell.textContent);
     const newLevel = Math.min(100, Math.max(0, oldLevel - applied.levelGain));
 
-    // --- Откат бонуса (симметрично п.4, независимо от знака applied.bonusGain) ---
+    // --- Откат п.4: вычитаем ровно тот бонус, что был начислен этой колонкой ---
     const bonusTotal = Math.max(0, parseFloat(row.dataset.affordabilityBonus || "0") - applied.bonusGain);
     row.dataset.affordabilityBonus = String(bonusTotal);
 
-    // Запись об этой колонке в "журнале" больше не актуальна: следующий клик
-    // по ней будет расценен диспетчером как НОВАЯ корректировка и посчитан
-    // заново, исходя из уровня на тот момент (см. syncAffordabilityForecastForRow).
+    // Запись об этой колонке в "журнале" больше не актуальна: при следующем
+    // включении эффект будет посчитан заново, исходя из уровня на тот момент.
     delete appliedState[colName];
     setAffordabilityAppliedState(row, appliedState);
 
     // --- Обновляем "Уровень финансовой доступности" ---
-    setLevelCellValue(levelCell, newLevel, true);
+    setLevelCellValue(levelCell, newLevel);
 
-    // --- Откат накопленного "Изменения уровня фин. доступности к пред.
-    // отчетной дате, п.п.": вычитаем ровно ту величину, что была в него
-    // добавлена при применении этой же колонки ---
+    // --- Откат п.7: из накопленного "Изменения уровня фин. доступности к
+    // пред. отчетной дате, п.п." вычитаем ровно тот прирост, что был в него
+    // добавлен при включении этой колонки ---
     const prevLevelChange = parseNumericCellValue(levelChangeCell.textContent);
-    setChangeCellValue(levelChangeCell, prevLevelChange - applied.levelGain, true);
+    setChangeCellValue(levelChangeCell, prevLevelChange - applied.levelGain);
 
     // --- п.5, п.6 пересчитываются от уже обновленных newLevel/bonusTotal —
     // это не "пересчет с нуля", а прямое следствие формул из задания,
-    // поэтому расхождений с applyAffordabilityForecastForRow не возникает.
-    // applyNeedLevelFill=true (п.2) и invertColors=true (п.1) — по тем же
-    // причинам, что и в applyAffordabilityForecastForRow выше. ---
+    // поэтому расхождений с applyAffordabilityForecastForRow не возникает ---
     const needLevel = Math.max(0, 100 - newLevel - bonusTotal);
-    setLevelCellValue(needCell, needLevel, true, true);
+    setLevelCellValue(needCell, needLevel);
 
-    setChangeCellValue(needChangeCell, -bonusTotal, true, true);
+    setChangeCellValue(needChangeCell, -bonusTotal);
 }
 
 // Диспетчер: вызывается из initNpToggles при любом переключении тумблера в
-// npTable. По отдельному заданию (п.3) больше не привязан жестко к
-// направлению "да"/"нет" — вместо этого смотрит, ЕСТЬ ЛИ уже активная
-// корректировка по этой колонке в этой строке (запись в "журнале"):
-//   - если есть — любой клик (в любую сторону) ОТКАТЫВАЕТ ее
-//     (revertAffordabilityForecastForRow), т.к. это возврат к состоянию до
-//     клика, которым эта корректировка была создана;
-//   - если нет — клик начинает НОВУЮ корректировку
-//     (applyAffordabilityForecastForRow), направление (начисление или
-//     списание) которой определяется тем, куда только что переключили
-//     тумблер (newState).
-// Благодаря этому одинаково корректно работают оба сценария:
-//   "да" (было "нет" в данных) -> "нет" -> "да" — начисление, затем откат;
-//   "нет" (было "да" в данных) -> "да" -> "нет" — списание, затем откат.
+// npTable и направляет выполнение либо в начисление (applyAffordabilityForecastForRow),
+// либо в симметричный откат (revertAffordabilityForecastForRow) — в
+// зависимости от направления переключения.
 function syncAffordabilityForecastForRow(npTable, row, colName, newState) {
-    const appliedState = getAffordabilityAppliedState(row);
-    if (appliedState[colName]) {
-        revertAffordabilityForecastForRow(npTable, row, colName);
+    if (newState === "yes") {
+        applyAffordabilityForecastForRow(npTable, row, colName);
     } else {
-        applyAffordabilityForecastForRow(npTable, row, colName, newState);
+        revertAffordabilityForecastForRow(npTable, row, colName);
     }
 }
 
@@ -2705,11 +2586,6 @@ setInterval(() => {
     // recalcDistrictToggleTotals — это и есть исправление глюка с
     // "неверное число на загрузке + вспышка -> верное число + вспышка").
     recalcDistrictToggleTotals();
-    // Заливка "Уровня потребности..." в КАЖДОЙ строке npTable (п.2 задания) —
-    // без вспышки (см. подробное пояснение в шапке fillNpTableNeedLevelCells);
-    // выполняется на каждом тике, поэтому появляется уже "при первичном
-    // показе" страницы, до любых кликов пользователя.
-    fillNpTableNeedLevelCells(parentDoc.getElementById("npTable"));
     initResetForecastButton();   // навешивает делегированный обработчик клика (один раз)
     initDistrictTableSticky();   // навешивает scroll/resize-обработчики (один раз)
     syncDistrictTableSticky();   // подстраховка: синхронизирует состояние по таймеру
@@ -3370,24 +3246,13 @@ elif st.session_state.page == 'district':
                         try:
                             num_val = float(str(val).replace(',', '.').strip())
 
-                            # По отдельному заданию: для колонки
-                            # AFFORDABILITY_NEED_CHANGE_COL (и ТОЛЬКО для нее)
-                            # логика цвета/стрелки "перевернута" относительно
-                            # обычной (см. подробное объяснение в JS-функции
-                            # setChangeCellValue, параметр invertColors): рост
-                            # потребности в ДБО — это ухудшение ситуации,
-                            # поэтому окрашивается красным, а снижение
-                            # потребности — зеленым, хотя стрелка по-прежнему
-                            # показывает направление изменения самого числа.
-                            is_inverted_col = (col == AFFORDABILITY_NEED_CHANGE_COL)
-
                             # Определяем цвет, стрелку и форматирование
                             if num_val > 0:
-                                css_class = "change-neg-custom" if is_inverted_col else "change-pos-custom"
+                                css_class = "change-pos-custom"
                                 arrow = "&#11014;"
                                 formatted_val = f"+{num_val:.1f}"
                             elif num_val < 0:
-                                css_class = "change-pos-custom" if is_inverted_col else "change-neg-custom"
+                                css_class = "change-neg-custom"
                                 arrow = "&#11015;"
                                 formatted_val = f"{num_val:.1f}"
                             else:
@@ -3424,21 +3289,13 @@ elif st.session_state.page == 'district':
                     try:
                         num_val = float(str(val).replace(',', '.').strip())
 
-                        # По отдельному заданию: для колонки
-                        # AFFORDABILITY_NEED_CHANGE_COL (и ТОЛЬКО для нее)
-                        # логика цвета/стрелки "перевернута" — см. подробное
-                        # объяснение в блоке "ДОБАВЛЕННЫЙ БЛОК" для nso_cells
-                        # чуть выше и в JS-функции setChangeCellValue
-                        # (параметр invertColors).
-                        is_inverted_col = (col == AFFORDABILITY_NEED_CHANGE_COL)
-
                         # Определяем цвет, стрелку и форматирование
                         if num_val > 0:
-                            css_class = "change-neg-custom" if is_inverted_col else "change-pos-custom"
+                            css_class = "change-pos-custom"
                             arrow = "&#11014;"
                             formatted_val = f"+{num_val:.1f}"
                         elif num_val < 0:
-                            css_class = "change-pos-custom" if is_inverted_col else "change-neg-custom"
+                            css_class = "change-neg-custom"
                             arrow = "&#11015;"
                             formatted_val = f"{num_val:.1f}"
                         else:
@@ -3524,22 +3381,13 @@ elif st.session_state.page == 'district':
                             try:
                                 num_val = float(str(val).replace(',', '.').strip())
 
-                                # По отдельному заданию: для колонки
-                                # AFFORDABILITY_NEED_CHANGE_COL (и ТОЛЬКО для
-                                # нее) логика цвета/стрелки "перевернута" —
-                                # см. подробное объяснение в блоке
-                                # "ДОБАВЛЕННЫЙ БЛОК" для nso_cells выше и в
-                                # JS-функции setChangeCellValue (параметр
-                                # invertColors).
-                                is_inverted_col = (col == AFFORDABILITY_NEED_CHANGE_COL)
-
                                 # Определяем цвет, стрелку и форматирование
                                 if num_val > 0:
-                                    css_class = "change-neg-custom" if is_inverted_col else "change-pos-custom"
+                                    css_class = "change-pos-custom"
                                     arrow = "&#11014;"
                                     formatted_val = f"+{num_val:.1f}"
                                 elif num_val < 0:
-                                    css_class = "change-pos-custom" if is_inverted_col else "change-neg-custom"
+                                    css_class = "change-neg-custom"
                                     arrow = "&#11015;"
                                     formatted_val = f"{num_val:.1f}"
                                 else:
