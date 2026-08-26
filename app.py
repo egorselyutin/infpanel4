@@ -64,7 +64,7 @@ init_counter_db()
 # =============================================================================
 # 2. НАСТРОЙКА СТРАНИЦЫ И ГЛОБАЛЬНОЙ СЕССИИ
 # =============================================================================
-st.set_page_config(page_title="Информационный портал КФД НСО", layout="wide", page_icon="🏦")
+st.set_page_config(page_title="Информационный портал КФД НСО", layout="wide", page_icon="favicon.svg")
 
 try:
     from streamlit.runtime.scriptrunner import get_script_run_ctx
